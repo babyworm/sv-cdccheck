@@ -20,6 +20,7 @@
 #include "slang-cdc/report_generator.h"
 #include "slang-cdc/waiver.h"
 #include "slang-cdc/clock_yaml_parser.h"
+#include "slang-cdc/filelist_parser.h"
 
 namespace fs = std::filesystem;
 
@@ -33,6 +34,9 @@ static void printUsage() {
               << "  -o, --output <dir>      Output directory (default: ./cdc_reports/)\n"
               << "  --format <fmt>          md|json|sdc|waiver|all (default: all)\n"
               << "  --dump-graph <file>     Export DOT graph to file\n\n"
+              << "Filelist:\n"
+              << "  -f <filelist>           Read source files and options from filelist\n"
+              << "  -F <filelist>           Same as -f, but paths relative to filelist location\n\n"
               << "Options:\n"
               << "  --sdc <file>            SDC file with clock definitions\n"
               << "  --clock-yaml <file>     Clock specification YAML file\n"
@@ -60,6 +64,7 @@ int main(int argc, char** argv) {
     std::string clock_yaml_file;
     std::string waiver_file;
     std::string dump_graph_file;
+    std::vector<std::string> filelist_files;
     int sync_stages = 2;
     bool strict = false;
     bool quiet = false;
@@ -89,6 +94,8 @@ int main(int argc, char** argv) {
             waiver_file = argv[++i];
         else if (arg == "--dump-graph" && i + 1 < argc)
             dump_graph_file = argv[++i];
+        else if ((arg == "-f" || arg == "-F") && i + 1 < argc)
+            filelist_files.push_back(argv[++i]);
         else if (arg == "--sync-stages" && i + 1 < argc)
             sync_stages = std::stoi(argv[++i]);
         else if (arg == "--strict")
@@ -113,9 +120,11 @@ int main(int argc, char** argv) {
     std::vector<const char*> slang_argv = {argv[0]};
     std::set<std::string> our_flags = {"-o", "--output", "--format", "--sdc", "--waiver",
         "--dump-graph", "-q", "--quiet", "-v", "--verbose", "--clock-yaml",
-        "--sync-stages", "--strict", "--ignore-gated", "--auto-clocks"};
+        "--sync-stages", "--strict", "--ignore-gated", "--auto-clocks",
+        "-f", "-F"};
     std::set<std::string> our_flags_with_arg = {"-o", "--output", "--format", "--sdc",
-        "--waiver", "--dump-graph", "--clock-yaml", "--sync-stages"};
+        "--waiver", "--dump-graph", "--clock-yaml", "--sync-stages",
+        "-f", "-F"};
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -127,6 +136,32 @@ int main(int argc, char** argv) {
         }
         slang_argv.push_back(argv[i]);
     }
+
+    // Expand filelists: parse -f/-F files and inject args for slang
+    // Own the strings so const char* pointers remain valid through parseCommandLine
+    std::vector<std::string> filelist_owned_args;
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if ((arg == "-f" || arg == "-F") && i + 1 < argc) {
+            std::string path_str = argv[++i];
+            auto fl = slang_cdc::FilelistParser::parse(path_str);
+
+            for (auto& src : fl.source_files)
+                filelist_owned_args.push_back(std::move(src));
+            for (auto& inc : fl.include_dirs) {
+                filelist_owned_args.push_back("-I");
+                filelist_owned_args.push_back(std::move(inc));
+            }
+            for (auto& def : fl.defines) {
+                filelist_owned_args.push_back("-D");
+                filelist_owned_args.push_back(std::move(def));
+            }
+            for (auto& lib : fl.library_files)
+                filelist_owned_args.push_back(std::move(lib));
+        }
+    }
+    for (auto& s : filelist_owned_args)
+        slang_argv.push_back(s.c_str());
 
     if (!driver.parseCommandLine(static_cast<int>(slang_argv.size()),
                                   const_cast<char**>(slang_argv.data())))
