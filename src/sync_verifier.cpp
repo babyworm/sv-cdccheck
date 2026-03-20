@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
+#include <cstdint>
+#include <cctype>
 
 namespace slang_cdc {
 
@@ -297,6 +299,13 @@ void SyncVerifier::analyze() {
 
     // Phase 6: Detect fan-out before sync completion
     detectFanoutBeforeSync();
+
+    // Phase 7: Detect Johnson counter pattern (before non-pow2 check,
+    // since Johnson counters are valid for non-pow2 depths)
+    detectJohnsonCounter();
+
+    // Phase 8: Detect non-power-of-2 FIFO depth
+    detectNonPow2FIFO();
 }
 
 // ─── Advanced synchronizer pattern detection ───
@@ -568,6 +577,177 @@ void SyncVerifier::detectFanoutBeforeSync() {
                 crossing.id = "CAUTION-" + std::to_string(++caution_counter_);
             crossing.recommendation = "Data used before completing sync chain. "
                 "First sync FF has multiple fanouts.";
+        }
+    }
+}
+
+void SyncVerifier::detectNonPow2FIFO() {
+    // For each crossing classified as AsyncFIFO or GrayCode, check if
+    // a non-power-of-2 depth can be inferred. Two approaches:
+    //   1. Count how many crossings share the same prefix (= bit width of pointer)
+    //      and check if 2^width matches a natural overflow (power-of-2 depth).
+    //   2. Heuristic: if the source signal name contains a comparison-based
+    //      wrap pattern (ptr == CONST → ptr <= 0), flag non-pow2.
+    //
+    // Limitation: This does not inspect RTL parameters from parent modules.
+    // It relies on the pointer bit width and crossing count.
+
+    // Group AsyncFIFO/GrayCode crossings by source prefix
+    std::unordered_map<std::string, std::vector<size_t>> prefix_groups;
+    for (size_t i = 0; i < crossings_.size(); ++i) {
+        auto& c = crossings_[i];
+        if (c.sync_type != SyncType::AsyncFIFO &&
+            c.sync_type != SyncType::GrayCode)
+            continue;
+
+        std::string prefix = extractPrefix(c.source_signal);
+        prefix_groups[prefix].push_back(i);
+    }
+
+    for (auto& [prefix, indices] : prefix_groups) {
+        if (indices.empty()) continue;
+
+        // bit_width = number of signals sharing this prefix
+        uint64_t bit_width = indices.size();
+
+        // Check if the source FF has fanin suggesting a wrap-around comparison
+        // (i.e., non-natural overflow → non-power-of-2 depth).
+        // Heuristic: look for any source FF whose fanin contains a constant
+        // or a signal matching "depth", "size", "entries" patterns.
+        bool has_wrap_comparison = false;
+        for (auto idx : indices) {
+            auto ff_it = ff_by_path_.find(crossings_[idx].source_signal);
+            if (ff_it == ff_by_path_.end()) continue;
+            const FFNode* src_ff = ff_it->second;
+            for (auto& fanin : src_ff->fanin_signals) {
+                std::string lower_fanin = fanin;
+                std::transform(lower_fanin.begin(), lower_fanin.end(),
+                               lower_fanin.begin(), ::tolower);
+                if (lower_fanin.find("depth") != std::string::npos ||
+                    lower_fanin.find("size") != std::string::npos ||
+                    lower_fanin.find("entries") != std::string::npos) {
+                    has_wrap_comparison = true;
+                    break;
+                }
+            }
+            if (has_wrap_comparison) break;
+        }
+
+        // If bit_width is such that 2^bit_width is NOT the natural depth
+        // (i.e., the pointer width could hold more states than needed),
+        // and there's evidence of wrap-around, flag it.
+        // With pure natural overflow (no wrap), 2^bit_width IS the depth → power of 2.
+        // With explicit wrap, the depth is likely non-power-of-2.
+        if (has_wrap_comparison) {
+            for (auto idx : indices) {
+                auto& c = crossings_[idx];
+                // Don't downgrade Johnson counters
+                if (c.sync_type == SyncType::JohnsonCounter) continue;
+
+                c.category = ViolationCategory::Caution;
+                c.severity = Severity::Medium;
+                if (c.id.find("CAUTION") == std::string::npos)
+                    c.id = "CAUTION-" + std::to_string(++caution_counter_);
+                c.recommendation = "Non-power-of-2 FIFO depth suspected (pointer width " +
+                    std::to_string(bit_width) + " bits with wrap-around logic). "
+                    "Verify Gray code wrap logic or use Johnson counter encoding.";
+            }
+        }
+    }
+}
+
+void SyncVerifier::detectJohnsonCounter() {
+    // Johnson counter heuristic:
+    // A Johnson counter with N states uses 2*N bits. The register shifts with
+    // feedback: {~q[MSB], q[MSB:1]}. Only 1 bit changes per clock cycle.
+    //
+    // Detection approach:
+    // 1. For multi-bit crossings (AsyncFIFO/GrayCode), check if bit_width
+    //    is unusually large (>= 2x expected for the depth).
+    // 2. Check if the source FF's fanin includes its own shifted version
+    //    (suggesting a shift register with feedback).
+    //
+    // Limitation: fanin-based detection is heuristic and may produce
+    // false positives on other shift-register patterns.
+
+    // Group AsyncFIFO/GrayCode crossings by source prefix
+    std::unordered_map<std::string, std::vector<size_t>> prefix_groups;
+    for (size_t i = 0; i < crossings_.size(); ++i) {
+        auto& c = crossings_[i];
+        if (c.sync_type != SyncType::AsyncFIFO &&
+            c.sync_type != SyncType::GrayCode &&
+            c.sync_type != SyncType::TwoFF &&
+            c.sync_type != SyncType::ThreeFF)
+            continue;
+
+        std::string prefix = extractPrefix(c.source_signal);
+        prefix_groups[prefix].push_back(i);
+    }
+
+    for (auto& [prefix, indices] : prefix_groups) {
+        uint64_t bit_width = indices.size();
+        if (bit_width < 4) continue;  // Johnson counter needs at least 4 bits (2 states)
+
+        // Check if source FFs show shift-register-with-negated-feedback pattern.
+        // In a Johnson counter, each FF's fanin includes the previous FF in the
+        // chain, and the first FF's fanin includes a negated version of the last.
+        bool has_shift_pattern = false;
+        for (auto idx : indices) {
+            auto ff_it = ff_by_path_.find(crossings_[idx].source_signal);
+            if (ff_it == ff_by_path_.end()) continue;
+            const FFNode* src_ff = ff_it->second;
+
+            // Check if fanin contains another signal from the same prefix group
+            // (shift register characteristic)
+            for (auto& fanin : src_ff->fanin_signals) {
+                std::string fanin_prefix = extractPrefix(fanin);
+                // Check if fanin is from the same register group (leaf name match)
+                std::string leaf_prefix = prefix;
+                auto last_dot = leaf_prefix.rfind('.');
+                if (last_dot != std::string::npos)
+                    leaf_prefix = leaf_prefix.substr(last_dot + 1);
+
+                std::string fanin_leaf = fanin;
+                auto fanin_dot = fanin_leaf.rfind('.');
+                if (fanin_dot != std::string::npos)
+                    fanin_leaf = fanin_leaf.substr(fanin_dot + 1);
+
+                // Strip index from fanin leaf for comparison
+                auto fanin_bracket = fanin_leaf.rfind('[');
+                if (fanin_bracket != std::string::npos)
+                    fanin_leaf = fanin_leaf.substr(0, fanin_bracket);
+                // Strip trailing digits
+                auto fpos = fanin_leaf.size();
+                while (fpos > 0 && std::isdigit(static_cast<unsigned char>(fanin_leaf[fpos - 1])))
+                    --fpos;
+                if (fpos < fanin_leaf.size() && fpos > 0)
+                    fanin_leaf = fanin_leaf.substr(0, fpos);
+
+                if (fanin_leaf == leaf_prefix) {
+                    has_shift_pattern = true;
+                    break;
+                }
+            }
+            if (has_shift_pattern) break;
+        }
+
+        // Johnson counter: bit_width should be even, and if we can determine
+        // expected depth, bit_width >= 2 * depth.
+        // Without explicit depth parameter, use the even-width + shift pattern heuristic.
+        bool is_even = (bit_width % 2 == 0);
+
+        if (has_shift_pattern && is_even && bit_width >= 4) {
+            for (auto idx : indices) {
+                auto& c = crossings_[idx];
+                c.sync_type = SyncType::JohnsonCounter;
+                c.category = ViolationCategory::Info;
+                c.severity = Severity::Info;
+                c.id = "INFO-" + std::to_string(++info_counter_);
+                c.recommendation = "Johnson counter synchronizer detected (" +
+                    std::to_string(bit_width) + "-bit for " +
+                    std::to_string(bit_width / 2) + " states). "
+                    "Valid single-bit-change encoding for non-power-of-2 depths.";
+            }
         }
     }
 }

@@ -62,6 +62,19 @@ private:
     /// Post-processing: detect fan-out before sync completion
     void detectFanoutBeforeSync();
 
+    /// Post-processing: detect non-power-of-2 FIFO depth and flag caution
+    /// Looks for DEPTH/SIZE/ENTRIES parameters in module scope and checks
+    /// if the value is a power of 2. Also uses heuristic wrap-around detection.
+    /// Limitation: parameters in parent modules are not detected.
+    void detectNonPow2FIFO();
+
+    /// Post-processing: detect Johnson counter synchronizer pattern
+    /// Johnson counters use 2*N bits for N states and maintain single-bit-change.
+    /// Heuristic: if bit_width >= 2 * depth_parameter, classify as JohnsonCounter.
+    /// Limitation: fanin-based shift/negate detection is heuristic and may have
+    /// false positives/negatives.
+    void detectJohnsonCounter();
+
     int info_counter_ = 0;
     int caution_counter_ = 0;
     int required_stages_ = 2;

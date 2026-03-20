@@ -38,6 +38,7 @@ static const char* syncTypeToString(SyncType st) {
         case SyncType::AsyncFIFO: return "async_fifo";
         case SyncType::MuxSync:   return "mux_sync";
         case SyncType::PulseSync: return "pulse_sync";
+        case SyncType::JohnsonCounter: return "johnson_counter";
     }
     return "unknown";
 }

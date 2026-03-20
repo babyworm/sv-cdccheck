@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include <optional>
 #include <memory>
+#include <cstdint>
 
 namespace slang_cdc {
 
@@ -93,8 +94,14 @@ enum class SyncType {
     Handshake,
     AsyncFIFO,
     MuxSync,
-    PulseSync
+    PulseSync,
+    JohnsonCounter
 };
+
+/// Check if a value is a power of 2 (and non-zero)
+inline bool isPowerOf2(uint64_t val) {
+    return val != 0 && (val & (val - 1)) == 0;
+}
 
 /// Edge between two FFs in the connectivity graph
 struct FFEdge {
