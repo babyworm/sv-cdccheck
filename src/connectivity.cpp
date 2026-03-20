@@ -132,6 +132,12 @@ static FFNode* findFFByName(
     if (it != output_map.end())
         return it->second;
 
+    // Try direct wire_map lookup: sig_name is a local wire driven by a child FF output
+    // (e.g., top-level always_ff reads wire_ab which is connected to u_a.q's output)
+    auto wit = wire_map.find(sig_name);
+    if (wit != wire_map.end())
+        return wit->second;
+
     // Resolve through port connection: sig_name is a port, trace to actual signal
     auto pit = port_map.find(sig_name);
     if (pit != port_map.end()) {

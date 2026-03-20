@@ -426,3 +426,43 @@ TEST_CASE("Phase2: integration — hierarchy with renamed clocks, no false cross
     // Both FFs should be in the SAME domain (sys_clk) — no crossings
     CHECK(pipeline.crossings.empty());
 }
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Feature 7: Inter-module wire crossing — child FF output read by top always_ff
+// Regression test for: wire_map not checked directly in findFFByName
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+TEST_CASE("Phase2: inter-module wire — child FF output read directly by top-level always_ff", "[phase2][intermodule]") {
+    // inner_mod u_a drives wire_ab via its output port q.
+    // The top-level always_ff (clk_b domain) reads wire_ab directly (not via a port).
+    // Before the fix, findFFByName("wire_ab", ...) skipped wire_map and returned nullptr,
+    // producing 0 edges and 0 violations. After the fix it must find u_a.q and emit 1 edge.
+    auto compilation = compileSV(R"(
+        module inner_mod (input logic clk_a, rst_n, d, output logic q);
+            always_ff @(posedge clk_a or negedge rst_n)
+                if (!rst_n) q <= 1'b0; else q <= d;
+        endmodule
+
+        module top (input logic clk_a, clk_b, rst_n, d);
+            logic wire_ab;
+            inner_mod u_a (.clk_a(clk_a), .rst_n(rst_n), .d(d), .q(wire_ab));
+            logic q_b;
+            always_ff @(posedge clk_b or negedge rst_n)
+                if (!rst_n) q_b <= 1'b0; else q_b <= wire_ab;
+        endmodule
+    )");
+
+    CDCPipeline pipeline;
+    pipeline.run(*compilation);
+
+    // Must detect both FFs: u_a.q (clk_a) and top.q_b (clk_b)
+    auto& ffs = pipeline.classifier->getFFNodes();
+    REQUIRE(ffs.size() >= 2);
+
+    // Must detect the FF-to-FF edge across the wire
+    REQUIRE(pipeline.edges.size() >= 1);
+
+    // Must flag a CDC violation (clk_a -> clk_b crossing)
+    REQUIRE(pipeline.crossings.size() >= 1);
+    CHECK(pipeline.crossings[0].severity == Severity::High);
+}
