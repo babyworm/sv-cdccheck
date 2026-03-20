@@ -101,6 +101,7 @@ struct FFEdge {
     const FFNode* dest = nullptr;
     std::vector<std::string> comb_path;
     SyncType sync_type = SyncType::None;
+    bool has_comb_logic = false; // combinational logic between source and dest FF
 };
 
 /// Crossing severity

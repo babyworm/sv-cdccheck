@@ -1,6 +1,7 @@
 #include "slang-cdc/connectivity.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
 #include "slang/ast/symbols/InstanceSymbols.h"
+#include "slang/ast/symbols/MemberSymbols.h"
 #include "slang/ast/symbols/PortSymbols.h"
 #include "slang/ast/symbols/BlockSymbols.h"
 #include "slang/ast/symbols/VariableSymbols.h"
@@ -254,6 +255,65 @@ static FFNode* findFFByName(
     return nullptr;
 }
 
+// Collect continuous assign statements: wire_name -> RHS signal names
+static void collectContinuousAssigns(
+    const slang::ast::InstanceSymbol& inst,
+    std::unordered_map<std::string, std::vector<std::string>>& cont_assigns)
+{
+    for (auto& member : inst.body.members()) {
+        if (member.kind != slang::ast::SymbolKind::ContinuousAssign) continue;
+
+        // ContinuousAssignSymbol has getAssignment() that returns an Assignment expression
+        auto& ca = member.as<slang::ast::ContinuousAssignSymbol>();
+        auto& assign_expr = ca.getAssignment().as<slang::ast::AssignmentExpression>();
+        std::string lhs_name;
+        if (assign_expr.left().kind == slang::ast::ExpressionKind::NamedValue) {
+            lhs_name = std::string(
+                assign_expr.left().as<slang::ast::NamedValueExpression>().symbol.name);
+        }
+        if (lhs_name.empty()) continue;
+
+        std::vector<std::string> rhs_signals;
+        collectReferencedSignals(assign_expr.right(), rhs_signals);
+        cont_assigns[lhs_name] = std::move(rhs_signals);
+    }
+}
+
+// Resolve a signal name through continuous assigns to find underlying FF sources.
+// Returns all FF sources reachable through combinational logic.
+// Sets has_comb to true if resolution went through a continuous assign.
+static void resolveToFFs(
+    const std::string& sig_name,
+    const std::string& inst_path,
+    const std::unordered_map<std::string, FFNode*>& output_map,
+    const std::unordered_map<std::string, std::string>& port_map,
+    const std::unordered_map<std::string, FFNode*>& wire_map,
+    const std::unordered_map<std::string, std::vector<std::string>>& cont_assigns,
+    std::vector<FFNode*>& result,
+    bool& has_comb,
+    int depth = 0)
+{
+    if (depth > 10) return; // prevent infinite recursion
+
+    // Try direct FF lookup first
+    FFNode* ff = findFFByName(sig_name, inst_path, output_map, port_map, wire_map);
+    if (ff) {
+        if (std::find(result.begin(), result.end(), ff) == result.end())
+            result.push_back(ff);
+        return;
+    }
+
+    // Try resolving through continuous assigns
+    auto it = cont_assigns.find(sig_name);
+    if (it != cont_assigns.end()) {
+        has_comb = true;
+        for (auto& rhs : it->second) {
+            resolveToFFs(rhs, inst_path, output_map, port_map, wire_map,
+                        cont_assigns, result, has_comb, depth + 1);
+        }
+    }
+}
+
 // Recursive: process an instance and its children for FF-to-FF edges
 static void processInstanceEdges(
     const slang::ast::InstanceSymbol& inst,
@@ -275,6 +335,10 @@ static void processInstanceEdges(
     for (auto& [k, v] : wire_map)
         combined_wire_map[k] = v;
 
+    // Collect continuous assigns for combinational path resolution
+    std::unordered_map<std::string, std::vector<std::string>> cont_assigns;
+    collectContinuousAssigns(inst, cont_assigns);
+
     for (auto& body_member : inst.body.members()) {
         if (body_member.kind == slang::ast::SymbolKind::ProceduralBlock) {
             auto& block = body_member.as<slang::ast::ProceduralBlockSymbol>();
@@ -292,6 +356,7 @@ static void processInstanceEdges(
                 if (!dest) continue;
 
                 for (auto& rhs_sig : assign.rhs_signals) {
+                    // First try direct FF lookup
                     FFNode* source = findFFByName(rhs_sig, inst_path,
                                                   output_map, port_map, combined_wire_map);
 
@@ -301,6 +366,23 @@ static void processInstanceEdges(
                         edge.dest = dest;
                         edge.comb_path = assign.rhs_signals;
                         edges.push_back(edge);
+                    } else if (!source) {
+                        // Try resolving through continuous assigns
+                        std::vector<FFNode*> resolved;
+                        bool has_comb = false;
+                        resolveToFFs(rhs_sig, inst_path, output_map, port_map,
+                                    combined_wire_map, cont_assigns, resolved,
+                                    has_comb);
+                        for (auto* src : resolved) {
+                            if (src && src != dest) {
+                                FFEdge edge;
+                                edge.source = src;
+                                edge.dest = dest;
+                                edge.comb_path = assign.rhs_signals;
+                                edge.has_comb_logic = has_comb;
+                                edges.push_back(edge);
+                            }
+                        }
                     }
                 }
             }

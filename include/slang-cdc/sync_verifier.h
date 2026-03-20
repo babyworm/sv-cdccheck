@@ -9,6 +9,7 @@ namespace slang_cdc {
 /// For each crossing, examines the destination-domain FFs to detect
 /// synchronizer patterns (2-FF, 3-FF, etc.).
 /// Updates crossing reports with sync_type and adjusts category accordingly.
+/// Also detects: reconvergence, combinational-before-sync, reset sync issues.
 class SyncVerifier {
 public:
     SyncVerifier(std::vector<CrossingReport>& crossings,
@@ -28,7 +29,22 @@ private:
     /// Find downstream FF connected to given FF in the same domain
     const FFNode* findNextFF(const FFNode* ff) const;
 
+    /// Find the FFEdge that connects source to dest (for comb logic check)
+    const FFEdge* findEdge(const std::string& source_signal,
+                           const std::string& dest_signal) const;
+
+    /// Post-processing: flag reconvergence when multiple signals from the
+    /// same source domain cross to the same dest domain independently
+    void detectReconvergence();
+
+    /// Post-processing: flag combinational logic before first sync FF
+    void detectCombBeforeSync();
+
+    /// Post-processing: check async resets crossing domains without reset sync
+    void detectResetSyncIssues();
+
     int info_counter_ = 0;
+    int caution_counter_ = 0;
 };
 
 } // namespace slang_cdc
