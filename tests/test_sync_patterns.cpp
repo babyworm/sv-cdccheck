@@ -1,11 +1,11 @@
 #include <catch2/catch_test_macros.hpp>
+#include "test_helpers.h"
 #include "slang-cdc/clock_tree.h"
 #include "slang-cdc/ff_classifier.h"
 #include "slang-cdc/connectivity.h"
 #include "slang-cdc/crossing_detector.h"
 #include "slang-cdc/sync_verifier.h"
 #include "slang-cdc/waiver.h"
-#include "slang/driver/Driver.h"
 
 #include <fstream>
 #include <filesystem>
@@ -14,23 +14,7 @@ namespace fs = std::filesystem;
 using namespace slang_cdc;
 
 static std::unique_ptr<slang::ast::Compilation> compileSV(const std::string& sv_code) {
-    static int counter = 0;
-    auto path = fs::temp_directory_path() /
-        ("test_sync_pat_" + std::to_string(counter++) + ".sv");
-    std::ofstream(path) << sv_code;
-
-    std::string path_str = path.string();
-    slang::driver::Driver driver;
-    driver.addStandardArgs();
-    const char* args[] = {"test", path_str.c_str()};
-    driver.parseCommandLine(2, const_cast<char**>(args));
-    driver.processOptions();
-    driver.parseAllSources();
-
-    auto compilation = driver.createCompilation();
-    compilation->getRoot();
-    compilation->getAllDiagnostics();
-    return compilation;
+    return slang_cdc::test::compileSV(sv_code, "test_sync_pat");
 }
 
 struct FullPipeline {

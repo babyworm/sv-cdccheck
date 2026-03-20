@@ -1,5 +1,6 @@
 #include "slang-cdc/ff_classifier.h"
 #include "slang-cdc/clock_tree.h"
+#include "slang-cdc/ast_utils.h"
 
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
 #include "slang/ast/symbols/InstanceSymbols.h"
@@ -22,15 +23,6 @@ namespace slang_cdc {
 FFClassifier::FFClassifier(slang::ast::Compilation& compilation,
                            ClockDatabase& clock_db)
     : compilation_(compilation), clock_db_(clock_db) {}
-
-// Extract the signal name from an Expression (typically NamedValueExpression)
-static std::string extractSignalName(const slang::ast::Expression& expr) {
-    if (expr.kind == slang::ast::ExpressionKind::NamedValue) {
-        auto& named = expr.as<slang::ast::NamedValueExpression>();
-        return std::string(named.symbol.name);
-    }
-    return "";
-}
 
 // Information extracted from one SignalEventControl
 struct EventInfo {
@@ -117,64 +109,7 @@ static SensitivityInfo classifyEvents(const std::vector<EventInfo>& events) {
     return info;
 }
 
-// Collect referenced signal names from an expression (RHS of assignment)
-static void collectRHSSignals(const slang::ast::Expression& expr,
-                              std::vector<std::string>& signals) {
-    switch (expr.kind) {
-        case slang::ast::ExpressionKind::NamedValue:
-        case slang::ast::ExpressionKind::HierarchicalValue: {
-            auto& named = expr.as<slang::ast::ValueExpressionBase>();
-            std::string name(named.symbol.name);
-            if (std::find(signals.begin(), signals.end(), name) == signals.end())
-                signals.push_back(name);
-            return;
-        }
-        case slang::ast::ExpressionKind::UnaryOp: {
-            auto& unary = expr.as<slang::ast::UnaryExpression>();
-            collectRHSSignals(unary.operand(), signals);
-            return;
-        }
-        case slang::ast::ExpressionKind::BinaryOp: {
-            auto& binary = expr.as<slang::ast::BinaryExpression>();
-            collectRHSSignals(binary.left(), signals);
-            collectRHSSignals(binary.right(), signals);
-            return;
-        }
-        case slang::ast::ExpressionKind::ConditionalOp: {
-            auto& cond = expr.as<slang::ast::ConditionalExpression>();
-            for (auto& condition : cond.conditions)
-                collectRHSSignals(*condition.expr, signals);
-            collectRHSSignals(cond.left(), signals);
-            collectRHSSignals(cond.right(), signals);
-            return;
-        }
-        case slang::ast::ExpressionKind::Concatenation: {
-            auto& concat = expr.as<slang::ast::ConcatenationExpression>();
-            for (auto* op : concat.operands())
-                collectRHSSignals(*op, signals);
-            return;
-        }
-        case slang::ast::ExpressionKind::ElementSelect: {
-            auto& sel = expr.as<slang::ast::ElementSelectExpression>();
-            collectRHSSignals(sel.value(), signals);
-            return;
-        }
-        case slang::ast::ExpressionKind::RangeSelect: {
-            auto& sel = expr.as<slang::ast::RangeSelectExpression>();
-            collectRHSSignals(sel.value(), signals);
-            return;
-        }
-        case slang::ast::ExpressionKind::Conversion: {
-            auto& conv = expr.as<slang::ast::ConversionExpression>();
-            collectRHSSignals(conv.operand(), signals);
-            return;
-        }
-        default:
-            return;
-    }
-}
-
-// Per-variable assignment info: LHS variable name + all RHS signal names
+// Per-variable assignment info for FF classification (LHS variable + RHS fanin)
 struct FFAssignInfo {
     std::string lhs_name;
     std::vector<std::string> rhs_signals;
@@ -199,7 +134,7 @@ static void collectAssignedVars(const slang::ast::Statement& stmt,
                     // Collect RHS signals for fanin
                     FFAssignInfo info;
                     info.lhs_name = name;
-                    collectRHSSignals(assign.right(), info.rhs_signals);
+                    collectReferencedSignals(assign.right(), info.rhs_signals);
                     assign_infos.push_back(std::move(info));
                 }
             }

@@ -14,13 +14,16 @@ SyncVerifier::SyncVerifier(std::vector<CrossingReport>& crossings,
 const FFNode* SyncVerifier::findNextFF(const FFNode* ff) const {
     // Find an FF in the same domain that is directly fed by this FF
     // with no combinational logic in between (sync chain characteristic).
-    for (auto& edge : edges_) {
-        if (edge.source == ff && edge.dest &&
-            edge.dest->domain == ff->domain &&
-            !edge.has_comb_logic) {
+    auto it = edges_from_.find(ff);
+    if (it == edges_from_.end()) return nullptr;
+
+    for (auto* edge : it->second) {
+        if (edge->dest &&
+            edge->dest->domain == ff->domain &&
+            !edge->has_comb_logic) {
             // Verify single fan-in: the dest FF's fanin should contain
             // only the source FF's leaf name (sync chain characteristic).
-            const auto& fanin = edge.dest->fanin_signals;
+            const auto& fanin = edge->dest->fanin_signals;
             std::string source_leaf = ff->hier_path;
             auto dot_pos = source_leaf.rfind('.');
             if (dot_pos != std::string::npos)
@@ -28,12 +31,12 @@ const FFNode* SyncVerifier::findNextFF(const FFNode* ff) const {
 
             if (fanin.empty()) {
                 // No fanin info available, accept the edge
-                return edge.dest;
+                return edge->dest;
             }
 
             bool single_fanin = (fanin.size() == 1 && fanin[0] == source_leaf);
             if (single_fanin)
-                return edge.dest;
+                return edge->dest;
         }
     }
     return nullptr;
@@ -57,11 +60,16 @@ SyncType SyncVerifier::detectSyncPattern(const FFNode* dest_ff) const {
 
 const FFEdge* SyncVerifier::findEdge(const std::string& source_signal,
                                       const std::string& dest_signal) const {
-    for (auto& edge : edges_) {
-        if (edge.source && edge.dest &&
-            edge.source->hier_path == source_signal &&
-            edge.dest->hier_path == dest_signal) {
-            return &edge;
+    // Use ff_by_path_ to find the source FFNode, then edges_from_ for its edges
+    auto ff_it = ff_by_path_.find(source_signal);
+    if (ff_it == ff_by_path_.end()) return nullptr;
+
+    auto edge_it = edges_from_.find(ff_it->second);
+    if (edge_it == edges_from_.end()) return nullptr;
+
+    for (auto* edge : edge_it->second) {
+        if (edge->dest && edge->dest->hier_path == dest_signal) {
+            return edge;
         }
     }
     return nullptr;
@@ -133,19 +141,52 @@ void SyncVerifier::detectResetSyncIssues() {
         }
     }
 
+    // Build map keyed by leaf signal name for O(1) reset-source lookups.
+    // Key: leaf name (after last '.'), Value: list of FFNodes with that leaf name.
+    std::unordered_map<std::string, std::vector<const FFNode*>> ff_by_leaf;
+    for (auto& ff : ff_nodes_) {
+        std::string leaf = ff->hier_path;
+        auto dot_pos = leaf.rfind('.');
+        if (dot_pos != std::string::npos)
+            leaf = leaf.substr(dot_pos + 1);
+        ff_by_leaf[leaf].push_back(ff.get());
+    }
+
+    // Build index for existing crossings: "source|dest" -> index
+    std::unordered_map<std::string, size_t> crossing_index;
+    for (size_t i = 0; i < crossings_.size(); ++i) {
+        crossing_index[crossings_[i].source_signal + "|" + crossings_[i].dest_signal] = i;
+    }
+
     for (auto& ff : ff_nodes_) {
         if (!ff->reset || !ff->reset->is_async || !ff->domain) continue;
 
-        // Find the FF that generates the reset signal
+        // Find the FF that generates the reset signal using map-based lookups
         const FFNode* reset_source_ff = nullptr;
-        for (auto& other_ff : ff_nodes_) {
-            if (other_ff->hier_path == ff->reset->hier_path ||
-                ff->reset->hier_path.ends_with("." + other_ff->hier_path.substr(
-                    other_ff->hier_path.rfind('.') + 1))) {
-                // Check if it's in a different domain
-                if (other_ff->domain && !other_ff->domain->isSameDomain(*ff->domain)) {
-                    reset_source_ff = other_ff.get();
-                    break;
+
+        // Try exact path match first
+        auto exact_it = ff_by_path_.find(ff->reset->hier_path);
+        if (exact_it != ff_by_path_.end()) {
+            const FFNode* candidate = exact_it->second;
+            if (candidate->domain && !candidate->domain->isSameDomain(*ff->domain)) {
+                reset_source_ff = candidate;
+            }
+        }
+
+        // Try leaf-name match if exact match failed
+        if (!reset_source_ff) {
+            std::string reset_leaf = ff->reset->hier_path;
+            auto dot_pos = reset_leaf.rfind('.');
+            if (dot_pos != std::string::npos)
+                reset_leaf = reset_leaf.substr(dot_pos + 1);
+
+            auto leaf_it = ff_by_leaf.find(reset_leaf);
+            if (leaf_it != ff_by_leaf.end()) {
+                for (auto* candidate : leaf_it->second) {
+                    if (candidate->domain && !candidate->domain->isSameDomain(*ff->domain)) {
+                        reset_source_ff = candidate;
+                        break;
+                    }
                 }
             }
         }
@@ -159,24 +200,18 @@ void SyncVerifier::detectResetSyncIssues() {
         bool is_synced = synced_signals.count(sync_key) > 0;
 
         if (!is_synced) {
-            // Create a CAUTION crossing for the unsynchronized reset
-            // But first check if we already have a crossing for this pair
-            bool already_reported = false;
-            for (auto& c : crossings_) {
-                if (c.source_signal == reset_source_ff->hier_path &&
-                    c.dest_signal == ff->hier_path) {
-                    // Update existing crossing
-                    c.category = ViolationCategory::Caution;
-                    c.severity = Severity::High;
-                    c.id = "CAUTION-" + std::to_string(++caution_counter_);
-                    c.recommendation = "Async reset from different clock domain without "
-                        "reset synchronizer. Use async-assert, sync-deassert pattern.";
-                    already_reported = true;
-                    break;
-                }
-            }
-
-            if (!already_reported) {
+            // Check if we already have a crossing for this pair
+            std::string pair_key = reset_source_ff->hier_path + "|" + ff->hier_path;
+            auto cx_it = crossing_index.find(pair_key);
+            if (cx_it != crossing_index.end()) {
+                // Update existing crossing
+                auto& c = crossings_[cx_it->second];
+                c.category = ViolationCategory::Caution;
+                c.severity = Severity::High;
+                c.id = "CAUTION-" + std::to_string(++caution_counter_);
+                c.recommendation = "Async reset from different clock domain without "
+                    "reset synchronizer. Use async-assert, sync-deassert pattern.";
+            } else {
                 // Add a new crossing report for the reset issue
                 CrossingReport report;
                 report.source_domain = reset_source_ff->domain;
@@ -189,6 +224,8 @@ void SyncVerifier::detectResetSyncIssues() {
                 report.id = "CAUTION-" + std::to_string(++caution_counter_);
                 report.recommendation = "Async reset from different clock domain without "
                     "reset synchronizer. Use async-assert, sync-deassert pattern.";
+                // Update crossing_index for newly added crossing
+                crossing_index[pair_key] = crossings_.size();
                 crossings_.push_back(std::move(report));
             }
         }
@@ -196,15 +233,25 @@ void SyncVerifier::detectResetSyncIssues() {
 }
 
 void SyncVerifier::analyze() {
+    // Build hash indexes for O(1) lookups
+    ff_by_path_.clear();
+    for (auto& ff : ff_nodes_) {
+        ff_by_path_[ff->hier_path] = ff.get();
+    }
+    edges_from_.clear();
+    for (auto& edge : edges_) {
+        if (edge.source) {
+            edges_from_[edge.source].push_back(&edge);
+        }
+    }
+
     // Phase 1: Detect sync patterns (existing)
     for (auto& crossing : crossings_) {
-        // Find the dest FF node for this crossing
+        // Find the dest FF node for this crossing via hash index
         const FFNode* dest_ff = nullptr;
-        for (auto& ff : ff_nodes_) {
-            if (ff->hier_path == crossing.dest_signal) {
-                dest_ff = ff.get();
-                break;
-            }
+        auto it = ff_by_path_.find(crossing.dest_signal);
+        if (it != ff_by_path_.end()) {
+            dest_ff = it->second;
         }
 
         crossing.sync_type = detectSyncPattern(dest_ff);
@@ -370,15 +417,10 @@ void SyncVerifier::detectPulseSyncPattern() {
             crossing.sync_type != SyncType::ThreeFF)
             continue;
 
-        // Find the dest FF (first sync stage)
-        const FFNode* dest_ff = nullptr;
-        for (auto& ff : ff_nodes_) {
-            if (ff->hier_path == crossing.dest_signal) {
-                dest_ff = ff.get();
-                break;
-            }
-        }
-        if (!dest_ff) continue;
+        // Find the dest FF (first sync stage) via hash index
+        auto ff_it = ff_by_path_.find(crossing.dest_signal);
+        if (ff_it == ff_by_path_.end()) continue;
+        const FFNode* dest_ff = ff_it->second;
 
         // Walk the sync chain to find the last stage
         const FFNode* second = findNextFF(dest_ff);
@@ -396,11 +438,14 @@ void SyncVerifier::detectPulseSyncPattern() {
         if (dot_pos != std::string::npos)
             last_leaf = last_leaf.substr(dot_pos + 1);
 
-        for (auto& edge : edges_) {
-            if (edge.source != last_sync || !edge.dest) continue;
-            if (edge.dest->domain != last_sync->domain) continue;
+        auto edge_it = edges_from_.find(last_sync);
+        if (edge_it == edges_from_.end()) continue;
 
-            const auto& fanin = edge.dest->fanin_signals;
+        for (auto* edge : edge_it->second) {
+            if (!edge->dest) continue;
+            if (edge->dest->domain != last_sync->domain) continue;
+
+            const auto& fanin = edge->dest->fanin_signals;
             if (fanin.size() < 2) continue;
 
             // Check if fanin contains the last sync stage output
@@ -425,22 +470,20 @@ void SyncVerifier::detectFanoutBeforeSync() {
             crossing.sync_type != SyncType::ThreeFF)
             continue;
 
-        // Find the first sync FF
-        const FFNode* first_sync = nullptr;
-        for (auto& ff : ff_nodes_) {
-            if (ff->hier_path == crossing.dest_signal) {
-                first_sync = ff.get();
-                break;
-            }
-        }
-        if (!first_sync) continue;
+        // Find the first sync FF via hash index
+        auto ff_it = ff_by_path_.find(crossing.dest_signal);
+        if (ff_it == ff_by_path_.end()) continue;
+        const FFNode* first_sync = ff_it->second;
 
         // Check if the first sync FF's output feeds any FF other than
         // the second sync stage
         int fanout_count = 0;
-        for (auto& edge : edges_) {
-            if (edge.source == first_sync && edge.dest) {
-                fanout_count++;
+        auto edge_it = edges_from_.find(first_sync);
+        if (edge_it != edges_from_.end()) {
+            for (auto* edge : edge_it->second) {
+                if (edge->dest) {
+                    fanout_count++;
+                }
             }
         }
 

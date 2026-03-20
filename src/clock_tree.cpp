@@ -9,7 +9,7 @@
 #include "slang/ast/Statement.h"
 
 #include <algorithm>
-#include <regex>
+#include <cstring>
 
 namespace slang_cdc {
 
@@ -360,16 +360,37 @@ void ClockTreeAnalyzer::inferRelationships() {
 
 // ── Helpers ──
 
+// Check for pattern at word boundaries (start-of-string or '_', end-of-string or '_')
+static bool matchWordBoundary(const std::string& lower, const char* pattern) {
+    size_t plen = std::strlen(pattern);
+    auto pos = lower.find(pattern);
+    while (pos != std::string::npos) {
+        size_t end = pos + plen;
+        bool start_ok = (pos == 0 || lower[pos - 1] == '_');
+        bool end_ok = (end == lower.size() || lower[end] == '_');
+        if (start_ok && end_ok) return true;
+        pos = lower.find(pattern, pos + 1);
+    }
+    return false;
+}
+
 bool ClockTreeAnalyzer::isClockName(const std::string& name) {
-    static std::regex clock_re(
-        R"((^|_)(clk|clock|ck)($|_))", std::regex::icase);
-    return std::regex_search(name, clock_re);
+    std::string lower = name;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    for (auto& pattern : {"clk", "clock", "ck"}) {
+        if (matchWordBoundary(lower, pattern)) return true;
+    }
+    return false;
 }
 
 bool ClockTreeAnalyzer::isResetName(const std::string& name) {
-    static std::regex reset_re(
-        R"((^|_)(rst|reset|rstn|rst_n)($|_))", std::regex::icase);
-    return std::regex_search(name, reset_re);
+    std::string lower = name;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    // Check longer patterns first to match correctly (rst_n before rst)
+    for (auto& pattern : {"reset", "rstn", "rst_n", "rst"}) {
+        if (matchWordBoundary(lower, pattern)) return true;
+    }
+    return false;
 }
 
 } // namespace slang_cdc

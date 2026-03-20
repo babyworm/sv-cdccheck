@@ -62,6 +62,10 @@ private:
     int info_counter_ = 0;
     int caution_counter_ = 0;
     int required_stages_ = 2;
+
+    /// Precomputed indexes built at the start of analyze()
+    std::unordered_map<std::string, const FFNode*> ff_by_path_;
+    std::unordered_map<const FFNode*, std::vector<const FFEdge*>> edges_from_;
 };
 
 } // namespace slang_cdc

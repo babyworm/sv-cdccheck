@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <iostream>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -102,7 +103,27 @@ int main(int argc, char** argv) {
     slang::driver::Driver driver;
     driver.addStandardArgs();
 
-    if (!driver.parseCommandLine(argc, argv))
+    // Build filtered argv for slang (exclude our custom options)
+    std::vector<const char*> slang_argv = {argv[0]};
+    std::set<std::string> our_flags = {"-o", "--output", "--format", "--sdc", "--waiver",
+        "--dump-graph", "-q", "--quiet", "-v", "--verbose", "--clock-yaml",
+        "--sync-stages", "--strict", "--ignore-gated"};
+    std::set<std::string> our_flags_with_arg = {"-o", "--output", "--format", "--sdc",
+        "--waiver", "--dump-graph", "--clock-yaml", "--sync-stages"};
+
+    for (int i = 1; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--version" || arg == "-h" || arg == "--help")
+            continue; // already handled above
+        if (our_flags.count(arg)) {
+            if (our_flags_with_arg.count(arg) && i + 1 < argc) i++; // skip value
+            continue;
+        }
+        slang_argv.push_back(argv[i]);
+    }
+
+    if (!driver.parseCommandLine(static_cast<int>(slang_argv.size()),
+                                  const_cast<char**>(slang_argv.data())))
         return 1;
 
     if (!driver.processOptions())

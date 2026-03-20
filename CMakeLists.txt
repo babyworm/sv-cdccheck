@@ -19,6 +19,7 @@ endif()
 
 # --- Library (core analysis passes) ---
 add_library(slang-cdc-lib STATIC
+    src/ast_utils.cpp
     src/clock_tree.cpp
     src/sdc_parser.cpp
     src/ff_classifier.cpp
