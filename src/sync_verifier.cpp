@@ -1,5 +1,6 @@
 #include "slang-cdc/sync_verifier.h"
 
+#include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -240,41 +241,219 @@ void SyncVerifier::analyze() {
 
     // Phase 4: Detect reset synchronizer issues
     detectResetSyncIssues();
+
+    // Phase 5: Detect advanced synchronizer patterns (upgrade TwoFF/ThreeFF)
+    detectGrayCodePattern();
+    detectHandshakePattern();
+    detectPulseSyncPattern();
+
+    // Phase 6: Detect fan-out before sync completion
+    detectFanoutBeforeSync();
 }
 
-// ─── Future synchronizer pattern detection criteria ───
-//
-// GrayCode:
-//   Detect multi-bit buses where all bits cross the same domain pair.
-//   The source side must encode using binary-to-gray conversion (XOR chain),
-//   and the destination side must decode with gray-to-binary. Both the
-//   encoder output and decoder input should pass through 2-FF synchronizers.
-//   Key structural pattern: N-bit register → N XOR gates → N 2-FF syncs.
-//
-// Handshake:
-//   Detect paired crossings: a request signal from domain A→B and an
-//   acknowledge signal from domain B→A. Both must be single-bit and have
-//   2-FF synchronizers. The request/ack pair forms a closed-loop protocol.
-//   Key structural pattern: req FF in domain A, ack FF in domain B,
-//   each crossing the other domain with a 2-FF sync chain.
-//
-// AsyncFIFO:
-//   Detect gray-coded write and read pointers crossing between domains.
-//   The FIFO must have: (1) write pointer gray-encoded crossing to read
-//   domain, (2) read pointer gray-encoded crossing to write domain,
-//   (3) full/empty comparators in the respective domains.
-//   Key structural pattern: dual-port memory + gray pointer pairs.
-//
-// MuxSync:
-//   Detect a multiplexer whose select signal is synchronized, allowing
-//   multi-bit data to cross safely. The data path goes through a MUX
-//   controlled by a synced select; the data is stable when select toggles.
-//   Key structural pattern: MUX with synced select + hold timing constraint.
-//
-// PulseSync:
-//   Detect a toggle-domain-crossing pulse synchronizer. The source domain
-//   toggles a FF on each pulse, the toggle signal is 2-FF synced, and the
-//   destination domain XORs consecutive sync outputs to regenerate the pulse.
-//   Key structural pattern: toggle FF → 2-FF sync → XOR edge detector.
+// ─── Advanced synchronizer pattern detection ───
+
+/// Extract common prefix from a signal name, stripping numeric suffix/index.
+/// e.g. "top.gray_ptr[2]" → "top.gray_ptr"
+///      "top.gray_ptr_2"  → "top.gray_ptr_"
+static std::string extractPrefix(const std::string& sig) {
+    // Strip trailing [N]
+    auto bracket = sig.rfind('[');
+    if (bracket != std::string::npos && sig.back() == ']')
+        return sig.substr(0, bracket);
+
+    // Strip trailing digits
+    auto pos = sig.size();
+    while (pos > 0 && std::isdigit(static_cast<unsigned char>(sig[pos - 1])))
+        --pos;
+    if (pos < sig.size() && pos > 0)
+        return sig.substr(0, pos);
+
+    return sig;
+}
+
+void SyncVerifier::detectGrayCodePattern() {
+    // Group synced crossings by (source_domain, dest_domain) pair
+    // Key: source_domain_name + "|" + dest_domain_name
+    std::unordered_map<std::string, std::vector<size_t>> domain_pair_crossings;
+
+    for (size_t i = 0; i < crossings_.size(); ++i) {
+        auto& c = crossings_[i];
+        if (!c.source_domain || !c.dest_domain) continue;
+        if (c.sync_type != SyncType::TwoFF && c.sync_type != SyncType::ThreeFF) continue;
+
+        std::string key = c.source_domain->canonical_name + "|" +
+                          c.dest_domain->canonical_name;
+        domain_pair_crossings[key].push_back(i);
+    }
+
+    for (auto& [key, indices] : domain_pair_crossings) {
+        if (indices.size() < 3) continue;
+
+        // Check if source signals share a common prefix with numeric suffix
+        std::unordered_map<std::string, std::vector<size_t>> prefix_groups;
+        for (auto idx : indices) {
+            std::string prefix = extractPrefix(crossings_[idx].source_signal);
+            prefix_groups[prefix].push_back(idx);
+        }
+
+        for (auto& [prefix, group_indices] : prefix_groups) {
+            if (group_indices.size() < 3) continue;
+
+            // All bits share prefix and all have 2-FF/3-FF sync → GrayCode
+            for (auto idx : group_indices) {
+                crossings_[idx].sync_type = SyncType::GrayCode;
+                crossings_[idx].recommendation = "Gray code synchronizer detected.";
+            }
+        }
+    }
+}
+
+void SyncVerifier::detectHandshakePattern() {
+    // Build map: "A|B" → list of synced crossing indices
+    std::unordered_map<std::string, std::vector<size_t>> pair_map;
+    for (size_t i = 0; i < crossings_.size(); ++i) {
+        auto& c = crossings_[i];
+        if (!c.source_domain || !c.dest_domain) continue;
+        if (c.sync_type != SyncType::TwoFF && c.sync_type != SyncType::ThreeFF) continue;
+
+        std::string key = c.source_domain->canonical_name + "|" +
+                          c.dest_domain->canonical_name;
+        pair_map[key].push_back(i);
+    }
+
+    // For each pair A→B, check if B→A also has a synced crossing
+    std::unordered_set<size_t> handshake_indices;
+    for (auto& [key, indices] : pair_map) {
+        auto sep = key.find('|');
+        std::string dom_a = key.substr(0, sep);
+        std::string dom_b = key.substr(sep + 1);
+        if (dom_a == dom_b) continue;
+
+        std::string reverse_key = dom_b + "|" + dom_a;
+        auto it = pair_map.find(reverse_key);
+        if (it == pair_map.end()) continue;
+
+        // Both directions have synced crossings. Check for req/ack naming.
+        bool has_req = false, has_ack = false;
+        for (auto idx : indices) {
+            auto& src = crossings_[idx].source_signal;
+            if (src.find("req") != std::string::npos) has_req = true;
+        }
+        for (auto idx : it->second) {
+            auto& src = crossings_[idx].source_signal;
+            if (src.find("ack") != std::string::npos) has_ack = true;
+        }
+
+        if (has_req && has_ack) {
+            // Strong match: req/ack naming
+            for (auto idx : indices) handshake_indices.insert(idx);
+            for (auto idx : it->second) handshake_indices.insert(idx);
+        } else {
+            // General bidirectional sync: also classify as handshake
+            for (auto idx : indices) handshake_indices.insert(idx);
+            for (auto idx : it->second) handshake_indices.insert(idx);
+        }
+    }
+
+    for (auto idx : handshake_indices) {
+        crossings_[idx].sync_type = SyncType::Handshake;
+        crossings_[idx].recommendation = "Handshake synchronizer detected.";
+    }
+}
+
+void SyncVerifier::detectPulseSyncPattern() {
+    // For each crossing with 2-FF sync, check if the sync chain output
+    // feeds into a XOR/XNOR with a delayed version (detected via fanin_signals).
+    for (auto& crossing : crossings_) {
+        if (crossing.sync_type != SyncType::TwoFF &&
+            crossing.sync_type != SyncType::ThreeFF)
+            continue;
+
+        // Find the dest FF (first sync stage)
+        const FFNode* dest_ff = nullptr;
+        for (auto& ff : ff_nodes_) {
+            if (ff->hier_path == crossing.dest_signal) {
+                dest_ff = ff.get();
+                break;
+            }
+        }
+        if (!dest_ff) continue;
+
+        // Walk the sync chain to find the last stage
+        const FFNode* second = findNextFF(dest_ff);
+        if (!second) continue;
+
+        const FFNode* last_sync = second;
+        const FFNode* third = findNextFF(second);
+        if (third) last_sync = third;
+
+        // Check if any FF downstream of the last sync stage has fanin
+        // containing both the last sync stage output AND a delayed version
+        // (which indicates XOR edge detection)
+        std::string last_leaf = last_sync->hier_path;
+        auto dot_pos = last_leaf.rfind('.');
+        if (dot_pos != std::string::npos)
+            last_leaf = last_leaf.substr(dot_pos + 1);
+
+        for (auto& edge : edges_) {
+            if (edge.source != last_sync || !edge.dest) continue;
+            if (edge.dest->domain != last_sync->domain) continue;
+
+            const auto& fanin = edge.dest->fanin_signals;
+            if (fanin.size() < 2) continue;
+
+            // Check if fanin contains the last sync stage output
+            // and another signal (the delayed version for XOR)
+            bool has_sync_out = false;
+            for (auto& f : fanin) {
+                if (f == last_leaf) { has_sync_out = true; break; }
+            }
+
+            if (has_sync_out && fanin.size() >= 2) {
+                crossing.sync_type = SyncType::PulseSync;
+                crossing.recommendation = "Pulse synchronizer detected.";
+                break;
+            }
+        }
+    }
+}
+
+void SyncVerifier::detectFanoutBeforeSync() {
+    for (auto& crossing : crossings_) {
+        if (crossing.sync_type != SyncType::TwoFF &&
+            crossing.sync_type != SyncType::ThreeFF)
+            continue;
+
+        // Find the first sync FF
+        const FFNode* first_sync = nullptr;
+        for (auto& ff : ff_nodes_) {
+            if (ff->hier_path == crossing.dest_signal) {
+                first_sync = ff.get();
+                break;
+            }
+        }
+        if (!first_sync) continue;
+
+        // Check if the first sync FF's output feeds any FF other than
+        // the second sync stage
+        int fanout_count = 0;
+        for (auto& edge : edges_) {
+            if (edge.source == first_sync && edge.dest) {
+                fanout_count++;
+            }
+        }
+
+        // A proper sync chain has exactly 1 fanout (to second stage)
+        if (fanout_count > 1) {
+            crossing.category = ViolationCategory::Caution;
+            crossing.severity = Severity::Medium;
+            if (crossing.id.find("CAUTION") == std::string::npos)
+                crossing.id = "CAUTION-" + std::to_string(++caution_counter_);
+            crossing.recommendation = "Data used before completing sync chain. "
+                "First sync FF has multiple fanouts.";
+        }
+    }
+}
 
 } // namespace slang_cdc

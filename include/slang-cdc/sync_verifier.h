@@ -47,6 +47,18 @@ private:
     /// Post-processing: check async resets crossing domains without reset sync
     void detectResetSyncIssues();
 
+    /// Post-processing: detect gray-code synchronizer pattern
+    void detectGrayCodePattern();
+
+    /// Post-processing: detect handshake (req/ack) synchronizer pattern
+    void detectHandshakePattern();
+
+    /// Post-processing: detect pulse synchronizer pattern
+    void detectPulseSyncPattern();
+
+    /// Post-processing: detect fan-out before sync completion
+    void detectFanoutBeforeSync();
+
     int info_counter_ = 0;
     int caution_counter_ = 0;
     int required_stages_ = 2;

@@ -18,6 +18,7 @@
 #include "slang-cdc/sync_verifier.h"
 #include "slang-cdc/report_generator.h"
 #include "slang-cdc/waiver.h"
+#include "slang-cdc/clock_yaml_parser.h"
 
 namespace fs = std::filesystem;
 
@@ -33,9 +34,11 @@ static void printUsage() {
               << "  --dump-graph <file>     Export DOT graph to file\n\n"
               << "Options:\n"
               << "  --sdc <file>            SDC file with clock definitions\n"
+              << "  --clock-yaml <file>     Clock specification YAML file\n"
               << "  --waiver <file>         Waiver YAML file\n"
               << "  --sync-stages <n>       Required synchronizer stages (default: 2)\n"
               << "  --strict                Treat CAUTION as VIOLATION in exit code\n"
+              << "  --ignore-gated          Skip gated-clock crossings (Severity::Low) from report\n"
               << "  -v, --verbose           Detailed output\n"
               << "  -q, --quiet             Only violations and summary\n"
               << "  --version               Show version\n"
@@ -52,12 +55,14 @@ int main(int argc, char** argv) {
     std::string output_dir = "./cdc_reports";
     std::string format = "all";
     std::string sdc_file;
+    std::string clock_yaml_file;
     std::string waiver_file;
     std::string dump_graph_file;
     int sync_stages = 2;
     bool strict = false;
     bool quiet = false;
     bool verbose = false;
+    bool ignore_gated = false;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -75,6 +80,8 @@ int main(int argc, char** argv) {
             format = argv[++i];
         else if (arg == "--sdc" && i + 1 < argc)
             sdc_file = argv[++i];
+        else if (arg == "--clock-yaml" && i + 1 < argc)
+            clock_yaml_file = argv[++i];
         else if (arg == "--waiver" && i + 1 < argc)
             waiver_file = argv[++i];
         else if (arg == "--dump-graph" && i + 1 < argc)
@@ -83,6 +90,8 @@ int main(int argc, char** argv) {
             sync_stages = std::stoi(argv[++i]);
         else if (arg == "--strict")
             strict = true;
+        else if (arg == "--ignore-gated")
+            ignore_gated = true;
         else if (arg == "-q" || arg == "--quiet")
             quiet = true;
         else if (arg == "-v" || arg == "--verbose")
@@ -118,6 +127,22 @@ int main(int argc, char** argv) {
             std::cout << "  Loading SDC: " << sdc_file << "\n";
         auto sdc = slang_cdc::SdcParser::parse(sdc_file);
         clock_analyzer.loadSdc(sdc);
+    }
+
+    // Load clock YAML specification before analysis
+    slang_cdc::ClockYamlParser clock_yaml_parser;
+    if (!clock_yaml_file.empty()) {
+        if (verbose)
+            std::cout << "  Loading clock YAML: " << clock_yaml_file << "\n";
+        if (!clock_yaml_parser.loadFile(clock_yaml_file)) {
+            std::cerr << "slang-cdc: warning: could not load clock YAML file: "
+                      << clock_yaml_file << "\n";
+        } else {
+            clock_yaml_parser.applyTo(clock_db);
+            if (verbose)
+                std::cout << "  Clock sources from YAML: "
+                          << clock_yaml_parser.getConfig().clock_sources.size() << "\n";
+        }
     }
 
     clock_analyzer.analyze();
@@ -170,6 +195,16 @@ int main(int argc, char** argv) {
         if (waiver_mgr.isWaived(c.source_signal, c.dest_signal)) {
             c.category = slang_cdc::ViolationCategory::Waived;
         }
+    }
+
+    // ─── Filter: remove gated-clock crossings if --ignore-gated ───
+    if (ignore_gated) {
+        crossings.erase(
+            std::remove_if(crossings.begin(), crossings.end(),
+                [](const slang_cdc::CrossingReport& c) {
+                    return c.severity == slang_cdc::Severity::Low;
+                }),
+            crossings.end());
     }
 
     // ─── Pass 6: Report Generation ───

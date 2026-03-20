@@ -13,6 +13,7 @@ struct WaiverEntry {
     std::string pattern;      // glob pattern: "top.u_debug.*"
     std::string reason;
     std::string owner;
+    std::string date;         // e.g., "2025-01-15"
 };
 
 /// Manages waivers loaded from YAML files

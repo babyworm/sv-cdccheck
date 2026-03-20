@@ -68,6 +68,7 @@ void WaiverManager::parseYaml(const std::string& content) {
                 else if (key == "pattern") current.pattern = val;
                 else if (key == "reason") current.reason = val;
                 else if (key == "owner") current.owner = val;
+                else if (key == "date") current.date = val;
             }
             continue;
         }
@@ -83,6 +84,7 @@ void WaiverManager::parseYaml(const std::string& content) {
                 else if (key == "pattern") current.pattern = val;
                 else if (key == "reason") current.reason = val;
                 else if (key == "owner") current.owner = val;
+                else if (key == "date") current.date = val;
             }
         }
     }

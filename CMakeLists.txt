@@ -27,6 +27,7 @@ add_library(slang-cdc-lib STATIC
     src/sync_verifier.cpp
     src/report_generator.cpp
     src/waiver.cpp
+    src/clock_yaml_parser.cpp
 )
 
 target_include_directories(slang-cdc-lib PUBLIC
@@ -66,6 +67,8 @@ if(SLANG_CDC_BUILD_TESTS)
         tests/test_phase4_usability.cpp
         tests/test_issue_fixes.cpp
         tests/test_remaining_features.cpp
+        tests/test_sync_patterns.cpp
+        tests/test_clock_yaml.cpp
     )
     target_link_libraries(slang-cdc-tests PRIVATE slang-cdc-lib Catch2::Catch2WithMain)
     add_test(NAME slang-cdc-tests COMMAND slang-cdc-tests)
