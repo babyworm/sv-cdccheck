@@ -15,6 +15,7 @@ public:
     void generateJSON(const std::filesystem::path& output_path) const;
     void generateDOT(const std::filesystem::path& output_path) const;
     void generateSDC(const std::filesystem::path& output_path) const;
+    void generateWaiverTemplate(const std::filesystem::path& output_path) const;
 
     /// RFC 8259 JSON string escaping
     static std::string jsonEscape(const std::string& s);

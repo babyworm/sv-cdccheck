@@ -161,6 +161,16 @@ std::string ReportGenerator::jsonEscape(const std::string& s) {
 }
 
 void ReportGenerator::generateMarkdown(const std::filesystem::path& output_path) const {
+    // Escape pipe characters that would break markdown table cells
+    auto mdEscape = [](const std::string& s) -> std::string {
+        std::string out;
+        for (char c : s) {
+            if (c == '|') out += "\\|";
+            else out += c;
+        }
+        return out;
+    };
+
     std::ofstream out(output_path);
     out << "# CDC Analysis Report\n\n";
     out << "## Summary\n\n";
@@ -183,8 +193,8 @@ void ReportGenerator::generateMarkdown(const std::filesystem::path& output_path)
     out << "| Domain | Source | Type | Edge | FFs |\n";
     out << "|--------|--------|------|------|-----|\n";
     for (auto& d : result_.clock_db.domains) {
-        out << "| " << d->canonical_name
-            << " | " << d->source->name
+        out << "| " << mdEscape(d->canonical_name)
+            << " | " << mdEscape(d->source->name)
             << " | ";
         switch (d->source->type) {
             case ClockSource::Type::Primary: out << "primary"; break;
@@ -207,18 +217,18 @@ void ReportGenerator::generateMarkdown(const std::filesystem::path& output_path)
             << " -> "
             << (c.dest_domain ? c.dest_domain->canonical_name : "?")
             << "\n";
-        out << "- Source: " << c.source_signal << "\n";
-        out << "- Dest: " << c.dest_signal << "\n";
+        out << "- Source: " << mdEscape(c.source_signal) << "\n";
+        out << "- Dest: " << mdEscape(c.dest_signal) << "\n";
         if (!c.path.empty()) {
             out << "- Path: ";
             for (size_t i = 0; i < c.path.size(); i++) {
-                out << c.path[i];
+                out << mdEscape(c.path[i]);
                 if (i + 1 < c.path.size()) out << " -> ";
             }
             out << "\n";
         }
         if (!c.recommendation.empty())
-            out << "- Fix: " << c.recommendation << "\n";
+            out << "- Fix: " << mdEscape(c.recommendation) << "\n";
         out << "\n";
     }
 }
@@ -347,6 +357,17 @@ void ReportGenerator::generateDOT(const std::filesystem::path& output_path) cons
         return out;
     };
 
+    // Escape strings for DOT label="..." values
+    auto dotEscape = [](const std::string& s) -> std::string {
+        std::string out;
+        for (char c : s) {
+            if (c == '"') out += "\\\"";
+            else if (c == '\\') out += "\\\\";
+            else out += c;
+        }
+        return out;
+    };
+
     // Emit FF nodes
     for (auto& ff : result_.ff_nodes) {
         std::string node_id = sanitize(ff->hier_path);
@@ -357,10 +378,10 @@ void ReportGenerator::generateDOT(const std::filesystem::path& output_path) cons
                 color = palette[it->second];
             }
         }
-        out << "  " << node_id << " [label=\"" << ff->hier_path << "\"";
+        out << "  " << node_id << " [label=\"" << dotEscape(ff->hier_path) << "\"";
         out << ", fillcolor=" << color;
         if (ff->domain)
-            out << ", tooltip=\"domain: " << ff->domain->canonical_name << "\"";
+            out << ", tooltip=\"domain: " << dotEscape(ff->domain->canonical_name) << "\"";
         out << "];\n";
     }
 
@@ -379,12 +400,30 @@ void ReportGenerator::generateDOT(const std::filesystem::path& output_path) cons
 
         out << "  " << src_id << " -> " << dst_id;
         if (is_crossing) {
-            out << " [color=red, penwidth=2.0, label=\"CDC\"]";
+            out << " [color=red, penwidth=2.0, label=\"" << dotEscape("CDC") << "\"]";
         }
         out << ";\n";
     }
 
     out << "}\n";
+}
+
+void ReportGenerator::generateWaiverTemplate(const std::filesystem::path& output_path) const {
+    std::ofstream out(output_path);
+    out << "waivers:\n";
+    int waiver_num = 0;
+    for (auto& c : result_.crossings) {
+        if (c.category != ViolationCategory::Violation)
+            continue;
+        waiver_num++;
+        char id_buf[16];
+        snprintf(id_buf, sizeof(id_buf), "WAIVE-%03d", waiver_num);
+        out << "  - id: " << id_buf << "\n";
+        out << "    crossing: \"" << c.source_signal << " -> " << c.dest_signal << "\"\n";
+        out << "    reason: \"\"\n";
+        out << "    owner: \"\"\n";
+        out << "    date: \"\"\n";
+    }
 }
 
 } // namespace slang_cdc

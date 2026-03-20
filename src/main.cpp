@@ -40,6 +40,7 @@ static void printUsage() {
               << "  --sync-stages <n>       Required synchronizer stages (default: 2)\n"
               << "  --strict                Treat CAUTION as VIOLATION in exit code\n"
               << "  --ignore-gated          Skip gated-clock crossings (Severity::Low) from report\n"
+              << "  --auto-clocks           Auto-detect clocks (default, for spec compliance)\n"
               << "  -v, --verbose           Detailed output\n"
               << "  -q, --quiet             Only violations and summary\n"
               << "  --version               Show version\n"
@@ -64,6 +65,7 @@ int main(int argc, char** argv) {
     bool quiet = false;
     bool verbose = false;
     bool ignore_gated = false;
+    bool auto_clocks = false;
 
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
@@ -93,11 +95,15 @@ int main(int argc, char** argv) {
             strict = true;
         else if (arg == "--ignore-gated")
             ignore_gated = true;
+        else if (arg == "--auto-clocks")
+            auto_clocks = true;
         else if (arg == "-q" || arg == "--quiet")
             quiet = true;
         else if (arg == "-v" || arg == "--verbose")
             verbose = true;
     }
+
+    (void)auto_clocks; // no-op flag: auto-detection is always on
 
     // Use slang's Driver for SV argument parsing and compilation
     slang::driver::Driver driver;
@@ -107,7 +113,7 @@ int main(int argc, char** argv) {
     std::vector<const char*> slang_argv = {argv[0]};
     std::set<std::string> our_flags = {"-o", "--output", "--format", "--sdc", "--waiver",
         "--dump-graph", "-q", "--quiet", "-v", "--verbose", "--clock-yaml",
-        "--sync-stages", "--strict", "--ignore-gated"};
+        "--sync-stages", "--strict", "--ignore-gated", "--auto-clocks"};
     std::set<std::string> our_flags_with_arg = {"-o", "--output", "--format", "--sdc",
         "--waiver", "--dump-graph", "--clock-yaml", "--sync-stages"};
 
@@ -253,6 +259,9 @@ int main(int argc, char** argv) {
 
     if (format == "sdc" || format == "all")
         report.generateSDC(fs::path(output_dir) / "cdc_constraints.sdc");
+
+    if (format == "waiver" || format == "all")
+        report.generateWaiverTemplate(fs::path(output_dir) / "cdc_waiver_template.yaml");
 
     if (!dump_graph_file.empty())
         report.generateDOT(dump_graph_file);

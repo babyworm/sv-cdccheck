@@ -34,9 +34,20 @@ std::vector<std::string> SdcParser::preprocessLines(const std::filesystem::path&
     std::string raw;
     while (std::getline(file, raw)) {
         // Strip comments (# to end of line, but not inside brackets)
-        auto comment_pos = raw.find('#');
-        if (comment_pos != std::string::npos)
-            raw = raw.substr(0, comment_pos);
+        {
+            size_t comment_pos = std::string::npos;
+            int brackets = 0;
+            for (size_t i = 0; i < raw.size(); ++i) {
+                if (raw[i] == '[') brackets++;
+                else if (raw[i] == ']' && brackets > 0) brackets--;
+                else if (raw[i] == '#' && brackets == 0) {
+                    comment_pos = i;
+                    break;
+                }
+            }
+            if (comment_pos != std::string::npos)
+                raw = raw.substr(0, comment_pos);
+        }
 
         // Trim trailing whitespace
         while (!raw.empty() && std::isspace(raw.back()))

@@ -7,6 +7,7 @@
 #include "slang-cdc/connectivity.h"
 #include "slang-cdc/crossing_detector.h"
 #include "slang-cdc/sync_verifier.h"
+#include "slang-cdc/report_generator.h"
 
 #include <fstream>
 #include <filesystem>
@@ -157,4 +158,162 @@ TEST_CASE("GAP: AnalysisResult counts are zero for empty result", "[gap]") {
     CHECK(result.info_count() == 0);
     CHECK(result.waived_count() == 0);
     CHECK(result.convention_count() == 0);
+}
+
+// ─── Task 1: DOT output with special chars in signal names ───
+
+TEST_CASE("GAP: DOT output escapes quotes and backslashes in labels", "[gap][report]") {
+    AnalysisResult result;
+
+    // Create a clock source/domain
+    auto src = std::make_unique<ClockSource>();
+    src->name = "clk";
+    auto* s = result.clock_db.addSource(std::move(src));
+    auto* dom = result.clock_db.findOrCreateDomain(s, Edge::Posedge);
+
+    // Create FF nodes with special characters
+    auto ff1 = std::make_unique<FFNode>();
+    ff1->hier_path = "top.u_a.sig\"quote";
+    ff1->domain = dom;
+    auto ff2 = std::make_unique<FFNode>();
+    ff2->hier_path = "top.u_b.sig\\back";
+    ff2->domain = dom;
+
+    result.ff_nodes.push_back(std::move(ff1));
+    result.ff_nodes.push_back(std::move(ff2));
+
+    auto dot_path = fs::temp_directory_path() / "test_dot_escape.dot";
+    ReportGenerator report(result);
+    report.generateDOT(dot_path);
+
+    std::ifstream in(dot_path);
+    std::string content((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+
+    // Quotes in labels must be escaped
+    CHECK(content.find("sig\\\"quote") != std::string::npos);
+    // Backslashes in labels must be escaped
+    CHECK(content.find("sig\\\\back") != std::string::npos);
+    fs::remove(dot_path);
+}
+
+// ─── Task 1: Markdown output with | in signal names ───
+
+TEST_CASE("GAP: Markdown output escapes pipe in signal names", "[gap][report]") {
+    AnalysisResult result;
+
+    auto src = std::make_unique<ClockSource>();
+    src->name = "clk_a";
+    auto* sa = result.clock_db.addSource(std::move(src));
+    auto* dom_a = result.clock_db.findOrCreateDomain(sa, Edge::Posedge);
+
+    auto src2 = std::make_unique<ClockSource>();
+    src2->name = "clk_b";
+    auto* sb = result.clock_db.addSource(std::move(src2));
+    auto* dom_b = result.clock_db.findOrCreateDomain(sb, Edge::Posedge);
+
+    CrossingReport cr;
+    cr.id = "VIOLATION-001";
+    cr.category = ViolationCategory::Violation;
+    cr.severity = Severity::High;
+    cr.source_signal = "top.bus|data[0]";
+    cr.dest_signal = "top.sync|out";
+    cr.source_domain = dom_a;
+    cr.dest_domain = dom_b;
+    cr.sync_type = SyncType::None;
+    cr.recommendation = "Add 2FF | synchronizer";
+    result.crossings.push_back(cr);
+
+    auto md_path = fs::temp_directory_path() / "test_md_escape.md";
+    ReportGenerator report(result);
+    report.generateMarkdown(md_path);
+
+    std::ifstream in(md_path);
+    std::string content((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+
+    // Pipe chars in signal names must be escaped
+    CHECK(content.find("top.bus\\|data[0]") != std::string::npos);
+    CHECK(content.find("top.sync\\|out") != std::string::npos);
+    CHECK(content.find("2FF \\| synchronizer") != std::string::npos);
+    fs::remove(md_path);
+}
+
+// ─── Task 2: Waiver template generation ───
+
+TEST_CASE("GAP: Waiver template generates entries for violations", "[gap][report]") {
+    AnalysisResult result;
+
+    auto src = std::make_unique<ClockSource>();
+    src->name = "clk_a";
+    auto* sa = result.clock_db.addSource(std::move(src));
+    auto* dom_a = result.clock_db.findOrCreateDomain(sa, Edge::Posedge);
+
+    auto src2 = std::make_unique<ClockSource>();
+    src2->name = "clk_b";
+    auto* sb = result.clock_db.addSource(std::move(src2));
+    auto* dom_b = result.clock_db.findOrCreateDomain(sb, Edge::Posedge);
+
+    // Add a VIOLATION crossing
+    CrossingReport v;
+    v.id = "VIOLATION-001";
+    v.category = ViolationCategory::Violation;
+    v.severity = Severity::High;
+    v.source_signal = "top.src_ff";
+    v.dest_signal = "top.dst_ff";
+    v.source_domain = dom_a;
+    v.dest_domain = dom_b;
+    v.sync_type = SyncType::None;
+    result.crossings.push_back(v);
+
+    // Add a CAUTION crossing (should NOT appear in waiver template)
+    CrossingReport c;
+    c.id = "CAUTION-001";
+    c.category = ViolationCategory::Caution;
+    c.severity = Severity::Medium;
+    c.source_signal = "top.src2";
+    c.dest_signal = "top.dst2";
+    c.source_domain = dom_a;
+    c.dest_domain = dom_b;
+    c.sync_type = SyncType::TwoFF;
+    result.crossings.push_back(c);
+
+    auto waiver_path = fs::temp_directory_path() / "test_waiver.yaml";
+    ReportGenerator report(result);
+    report.generateWaiverTemplate(waiver_path);
+
+    std::ifstream in(waiver_path);
+    std::string content((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+
+    CHECK(content.find("waivers:") != std::string::npos);
+    CHECK(content.find("WAIVE-001") != std::string::npos);
+    CHECK(content.find("top.src_ff -> top.dst_ff") != std::string::npos);
+    CHECK(content.find("reason: \"\"") != std::string::npos);
+    CHECK(content.find("owner: \"\"") != std::string::npos);
+    CHECK(content.find("date: \"\"") != std::string::npos);
+    // CAUTION crossing should not generate a waiver entry
+    CHECK(content.find("WAIVE-002") == std::string::npos);
+    CHECK(content.find("top.src2") == std::string::npos);
+    fs::remove(waiver_path);
+}
+
+// ─── Task 4: SDC comment inside brackets preserved ───
+
+TEST_CASE("GAP: SDC comment inside brackets is preserved", "[gap][sdc]") {
+    static int sdc_ctr = 100;
+    auto path = fs::temp_directory_path() / ("test_bracket_comment_" + std::to_string(sdc_ctr++) + ".sdc");
+    {
+        std::ofstream out(path);
+        out << "create_clock -name sys_clk -period 10 [get_ports clk#0]\n";
+        out << "create_clock -name aux_clk -period 5 [get_ports aux] # real comment\n";
+    }
+    auto sdc = SdcParser::parse(path);
+    REQUIRE(sdc.clocks.size() == 2);
+    // The first clock target should contain the # character (inside brackets)
+    CHECK(sdc.clocks[0].name == "sys_clk");
+    CHECK(sdc.clocks[0].target == "clk#0");
+    // The second clock should have its comment stripped correctly
+    CHECK(sdc.clocks[1].name == "aux_clk");
+    fs::remove(path);
 }
