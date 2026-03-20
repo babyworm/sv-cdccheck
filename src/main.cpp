@@ -25,7 +25,7 @@
 namespace fs = std::filesystem;
 
 static void printUsage() {
-    std::cout << "slang-cdc v0.1.0 — Structural CDC Analysis Tool\n\n"
+    std::cout << "slang-cdc v0.1.1 — Structural CDC Analysis Tool\n\n"
               << "Usage: slang-cdc [OPTIONS] <SV_FILES...>\n\n"
               << "Required:\n"
               << "  <SV_FILES...>           SystemVerilog source files\n"
@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--version") {
-            std::cout << "slang-cdc 0.1.0\n";
+            std::cout << "slang-cdc 0.1.1\n";
             return 0;
         }
         if (arg == "-h" || arg == "--help") {

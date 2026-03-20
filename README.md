@@ -113,7 +113,7 @@ make test     # 171 tests, 515 assertions
 ```
 $ ./build/slang-cdc --help
 
-slang-cdc v0.1.0 — Structural CDC Analysis Tool
+slang-cdc v0.1.1 — Structural CDC Analysis Tool
 
 Usage: slang-cdc [OPTIONS] <SV_FILES...>
 
