@@ -79,6 +79,7 @@ if(SLANG_CDC_BUILD_TESTS)
         tests/test_spyglass_rules.cpp
         tests/test_corner_cases.cpp
         tests/test_filelist.cpp
+        tests/test_inter_module_e2e.cpp
     )
     target_link_libraries(slang-cdc-tests PRIVATE slang-cdc-lib Catch2::Catch2WithMain)
     target_compile_definitions(slang-cdc-tests PRIVATE
