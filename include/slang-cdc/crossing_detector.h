@@ -22,6 +22,7 @@ private:
     std::vector<CrossingReport> crossings_;
     int violation_counter_ = 0;
     int caution_counter_ = 0;
+    int convention_counter_ = 0;
 };
 
 } // namespace slang_cdc

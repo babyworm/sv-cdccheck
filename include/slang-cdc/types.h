@@ -166,6 +166,8 @@ struct AnalysisResult {
     int violation_count() const;
     int caution_count() const;
     int info_count() const;
+    int waived_count() const;
+    int convention_count() const;
 };
 
 } // namespace slang_cdc

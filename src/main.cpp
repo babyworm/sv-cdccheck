@@ -16,6 +16,7 @@
 #include "slang-cdc/crossing_detector.h"
 #include "slang-cdc/sync_verifier.h"
 #include "slang-cdc/report_generator.h"
+#include "slang-cdc/waiver.h"
 
 namespace fs = std::filesystem;
 
@@ -27,9 +28,11 @@ static void printUsage() {
               << "  --top <module>          Top-level module name\n\n"
               << "Output:\n"
               << "  -o, --output <dir>      Output directory (default: ./cdc_reports/)\n"
-              << "  --format <fmt>          md|json|all (default: all)\n\n"
+              << "  --format <fmt>          md|json|all (default: all)\n"
+              << "  --dump-graph <file>     Export DOT graph to file\n\n"
               << "Options:\n"
               << "  --sdc <file>            SDC file with clock definitions\n"
+              << "  --waiver <file>         Waiver YAML file\n"
               << "  -v, --verbose           Detailed output\n"
               << "  -q, --quiet             Only violations and summary\n"
               << "  --version               Show version\n"
@@ -46,6 +49,8 @@ int main(int argc, char** argv) {
     std::string output_dir = "./cdc_reports";
     std::string format = "all";
     std::string sdc_file;
+    std::string waiver_file;
+    std::string dump_graph_file;
     bool quiet = false;
     bool verbose = false;
 
@@ -65,6 +70,10 @@ int main(int argc, char** argv) {
             format = argv[++i];
         else if (arg == "--sdc" && i + 1 < argc)
             sdc_file = argv[++i];
+        else if (arg == "--waiver" && i + 1 < argc)
+            waiver_file = argv[++i];
+        else if (arg == "--dump-graph" && i + 1 < argc)
+            dump_graph_file = argv[++i];
         else if (arg == "-q" || arg == "--quiet")
             quiet = true;
         else if (arg == "-v" || arg == "--verbose")
@@ -134,6 +143,25 @@ int main(int argc, char** argv) {
                                      connectivity.getEdges());
     verifier.analyze();
 
+    // ─── Apply Waivers ───
+    slang_cdc::WaiverManager waiver_mgr;
+    if (!waiver_file.empty()) {
+        if (verbose)
+            std::cout << "  Loading waivers: " << waiver_file << "\n";
+        if (!waiver_mgr.loadFile(waiver_file)) {
+            std::cerr << "slang-cdc: warning: could not load waiver file: "
+                      << waiver_file << "\n";
+        } else if (verbose) {
+            std::cout << "  Waivers loaded: " << waiver_mgr.getWaivers().size() << "\n";
+        }
+    }
+
+    for (auto& c : crossings) {
+        if (waiver_mgr.isWaived(c.source_signal, c.dest_signal)) {
+            c.category = slang_cdc::ViolationCategory::Waived;
+        }
+    }
+
     // ─── Pass 6: Report Generation ───
     slang_cdc::AnalysisResult result;
     result.clock_db = std::move(clock_db);
@@ -149,12 +177,17 @@ int main(int argc, char** argv) {
     if (format == "json" || format == "all")
         report.generateJSON(fs::path(output_dir) / "cdc_report.json");
 
+    if (!dump_graph_file.empty())
+        report.generateDOT(dump_graph_file);
+
     // ─── Summary ───
     if (!quiet) {
         std::cout << "\n  === CDC Summary ===\n";
-        std::cout << "  VIOLATION: " << result.violation_count() << "\n";
-        std::cout << "  CAUTION:   " << result.caution_count() << "\n";
-        std::cout << "  INFO:      " << result.info_count() << "\n";
+        std::cout << "  VIOLATION:  " << result.violation_count() << "\n";
+        std::cout << "  CAUTION:    " << result.caution_count() << "\n";
+        std::cout << "  CONVENTION: " << result.convention_count() << "\n";
+        std::cout << "  INFO:       " << result.info_count() << "\n";
+        std::cout << "  WAIVED:     " << result.waived_count() << "\n";
         std::cout << "\n  Reports written to: " << output_dir << "/\n";
     }
 
