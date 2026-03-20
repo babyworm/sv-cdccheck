@@ -27,12 +27,35 @@ jobs:
     - name: Build
       run: cmake --build build -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 
-    - name: Test
+    - name: Unit tests
       run: cd build && ctest --output-on-failure
 
-    - name: End-to-end test
+    - name: End-to-end test (missing sync → 1 violation)
       run: |
-        ./build/slang-cdc tests/basic/02_missing_sync.sv --top missing_sync --format json -o /tmp/cdc_out
+        # slang-cdc returns exit code = violation count, so 1 is expected here
+        EXIT_CODE=0
+        ./build/slang-cdc tests/basic/02_missing_sync.sv --top missing_sync --format json -o /tmp/cdc_out || EXIT_CODE=$?
+        echo "Exit code: $EXIT_CODE"
+        test "$EXIT_CODE" -eq 1  # expect exactly 1 violation
         test -f /tmp/cdc_out/cdc_report.json
         grep -q '"violations": 1' /tmp/cdc_out/cdc_report.json
-        echo "E2E test passed: 1 violation detected"
+        echo "PASS: 1 violation detected as expected"
+
+    - name: End-to-end test (2-FF sync → 0 violations)
+      run: |
+        EXIT_CODE=0
+        ./build/slang-cdc tests/basic/03_two_ff_sync.sv --top two_ff_sync --format json -o /tmp/cdc_sync || EXIT_CODE=$?
+        echo "Exit code: $EXIT_CODE"
+        test "$EXIT_CODE" -eq 0  # expect 0 violations (properly synced)
+        grep -q '"violations": 0' /tmp/cdc_sync/cdc_report.json
+        grep -q '"info": 1' /tmp/cdc_sync/cdc_report.json
+        echo "PASS: 0 violations, 1 INFO (2-FF sync detected)"
+
+    - name: End-to-end test (no crossing → 0 violations)
+      run: |
+        EXIT_CODE=0
+        ./build/slang-cdc tests/basic/01_no_crossing.sv --top single_domain --format json -o /tmp/cdc_clean || EXIT_CODE=$?
+        echo "Exit code: $EXIT_CODE"
+        test "$EXIT_CODE" -eq 0
+        grep -q '"violations": 0' /tmp/cdc_clean/cdc_report.json
+        echo "PASS: clean design, 0 violations"
