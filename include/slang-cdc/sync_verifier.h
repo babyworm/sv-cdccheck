@@ -18,6 +18,10 @@ public:
 
     void analyze();
 
+    /// Set minimum required synchronizer stages (default: 2).
+    /// A crossing with fewer stages than required is not downgraded to INFO.
+    void setRequiredStages(int n) { required_stages_ = n; }
+
 private:
     std::vector<CrossingReport>& crossings_;
     const std::vector<std::unique_ptr<FFNode>>& ff_nodes_;
@@ -45,6 +49,7 @@ private:
 
     int info_counter_ = 0;
     int caution_counter_ = 0;
+    int required_stages_ = 2;
 };
 
 } // namespace slang_cdc

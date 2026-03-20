@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <iostream>
 #include <filesystem>
 #include <string>
@@ -28,11 +29,13 @@ static void printUsage() {
               << "  --top <module>          Top-level module name\n\n"
               << "Output:\n"
               << "  -o, --output <dir>      Output directory (default: ./cdc_reports/)\n"
-              << "  --format <fmt>          md|json|all (default: all)\n"
+              << "  --format <fmt>          md|json|sdc|all (default: all)\n"
               << "  --dump-graph <file>     Export DOT graph to file\n\n"
               << "Options:\n"
               << "  --sdc <file>            SDC file with clock definitions\n"
               << "  --waiver <file>         Waiver YAML file\n"
+              << "  --sync-stages <n>       Required synchronizer stages (default: 2)\n"
+              << "  --strict                Treat CAUTION as VIOLATION in exit code\n"
               << "  -v, --verbose           Detailed output\n"
               << "  -q, --quiet             Only violations and summary\n"
               << "  --version               Show version\n"
@@ -51,6 +54,8 @@ int main(int argc, char** argv) {
     std::string sdc_file;
     std::string waiver_file;
     std::string dump_graph_file;
+    int sync_stages = 2;
+    bool strict = false;
     bool quiet = false;
     bool verbose = false;
 
@@ -74,6 +79,10 @@ int main(int argc, char** argv) {
             waiver_file = argv[++i];
         else if (arg == "--dump-graph" && i + 1 < argc)
             dump_graph_file = argv[++i];
+        else if (arg == "--sync-stages" && i + 1 < argc)
+            sync_stages = std::stoi(argv[++i]);
+        else if (arg == "--strict")
+            strict = true;
         else if (arg == "-q" || arg == "--quiet")
             quiet = true;
         else if (arg == "-v" || arg == "--verbose")
@@ -141,6 +150,7 @@ int main(int argc, char** argv) {
     // ─── Pass 5: Synchronizer Verification ───
     slang_cdc::SyncVerifier verifier(crossings, classifier.getFFNodes(),
                                      connectivity.getEdges());
+    verifier.setRequiredStages(sync_stages);
     verifier.analyze();
 
     // ─── Apply Waivers ───
@@ -179,6 +189,9 @@ int main(int argc, char** argv) {
     if (format == "json" || format == "all")
         report.generateJSON(fs::path(output_dir) / "cdc_report.json");
 
+    if (format == "sdc" || format == "all")
+        report.generateSDC(fs::path(output_dir) / "cdc_constraints.sdc");
+
     if (!dump_graph_file.empty())
         report.generateDOT(dump_graph_file);
 
@@ -193,6 +206,9 @@ int main(int argc, char** argv) {
         std::cout << "\n  Reports written to: " << output_dir << "/\n";
     }
 
-    // Exit code = violation count (for CI)
-    return result.violation_count();
+    // Exit code = violation count (for CI), capped at 255 for POSIX
+    int exit_count = result.violation_count();
+    if (strict)
+        exit_count += result.caution_count();
+    return std::min(exit_count, 255);
 }

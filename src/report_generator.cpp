@@ -6,6 +6,42 @@
 
 namespace slang_cdc {
 
+static const char* categoryToString(ViolationCategory cat) {
+    switch (cat) {
+        case ViolationCategory::Violation:  return "VIOLATION";
+        case ViolationCategory::Caution:    return "CAUTION";
+        case ViolationCategory::Convention: return "CONVENTION";
+        case ViolationCategory::Info:       return "INFO";
+        case ViolationCategory::Waived:     return "WAIVED";
+    }
+    return "UNKNOWN";
+}
+
+static const char* severityToString(Severity sev) {
+    switch (sev) {
+        case Severity::None:   return "none";
+        case Severity::Info:   return "info";
+        case Severity::Low:    return "low";
+        case Severity::Medium: return "medium";
+        case Severity::High:   return "high";
+    }
+    return "unknown";
+}
+
+static const char* syncTypeToString(SyncType st) {
+    switch (st) {
+        case SyncType::None:      return "none";
+        case SyncType::TwoFF:     return "two_ff";
+        case SyncType::ThreeFF:   return "three_ff";
+        case SyncType::GrayCode:  return "gray_code";
+        case SyncType::Handshake: return "handshake";
+        case SyncType::AsyncFIFO: return "async_fifo";
+        case SyncType::MuxSync:   return "mux_sync";
+        case SyncType::PulseSync: return "pulse_sync";
+    }
+    return "unknown";
+}
+
 int AnalysisResult::violation_count() const {
     int count = 0;
     for (auto& c : crossings)
@@ -136,9 +172,16 @@ void ReportGenerator::generateMarkdown(const std::filesystem::path& output_path)
     out << "| INFO | " << result_.info_count() << " |\n";
     out << "| WAIVED | " << result_.waived_count() << " |\n\n";
 
+    // Count FFs per domain
+    std::unordered_map<std::string, int> ff_per_domain;
+    for (auto& ff : result_.ff_nodes) {
+        if (ff->domain)
+            ff_per_domain[ff->domain->canonical_name]++;
+    }
+
     out << "## Clock Domains\n\n";
-    out << "| Domain | Source | Type | Edge |\n";
-    out << "|--------|--------|------|------|\n";
+    out << "| Domain | Source | Type | Edge | FFs |\n";
+    out << "|--------|--------|------|------|-----|\n";
     for (auto& d : result_.clock_db.domains) {
         out << "| " << d->canonical_name
             << " | " << d->source->name
@@ -149,7 +192,11 @@ void ReportGenerator::generateMarkdown(const std::filesystem::path& output_path)
             case ClockSource::Type::Virtual: out << "virtual"; break;
             case ClockSource::Type::AutoDetected: out << "auto"; break;
         }
+        int ff_count = 0;
+        auto it = ff_per_domain.find(d->canonical_name);
+        if (it != ff_per_domain.end()) ff_count = it->second;
         out << " | " << (d->edge == Edge::Posedge ? "posedge" : "negedge")
+            << " | " << ff_count
             << " |\n";
     }
 
@@ -217,6 +264,11 @@ void ReportGenerator::generateJSON(const std::filesystem::path& output_path) con
         }
         out << "]";
 
+        // Category, severity, sync_type
+        out << ", \"category\": \"" << categoryToString(c.category) << "\"";
+        out << ", \"severity\": \"" << severityToString(c.severity) << "\"";
+        out << ", \"sync_type\": \"" << syncTypeToString(c.sync_type) << "\"";
+
         // Recommendation
         out << ", \"recommendation\": \"" << jsonEscape(c.recommendation) << "\"";
 
@@ -226,6 +278,44 @@ void ReportGenerator::generateJSON(const std::filesystem::path& output_path) con
     }
     out << "  ]\n";
     out << "}\n";
+}
+
+void ReportGenerator::generateSDC(const std::filesystem::path& output_path) const {
+    std::ofstream out(output_path);
+    out << "# Auto-generated CDC constraints by slang-cdc\n";
+    out << "# " << result_.crossings.size() << " crossing(s)\n\n";
+
+    for (auto& c : result_.crossings) {
+        std::string src_cell = c.source_signal;
+        std::string dst_cell = c.dest_signal;
+
+        if (c.category == ViolationCategory::Waived) {
+            out << "set_false_path"
+                << " -from [get_cells {" << src_cell << "}]"
+                << " -to [get_cells {" << dst_cell << "}]"
+                << "  ;# WAIVED: " << c.id << "\n";
+        } else if (c.sync_type != SyncType::None) {
+            // Synced crossings: constrain max delay based on dest domain period
+            std::string period = "10.0"; // default
+            if (c.dest_domain && c.dest_domain->source &&
+                c.dest_domain->source->period_ns.has_value()) {
+                std::ostringstream ps;
+                ps << c.dest_domain->source->period_ns.value();
+                period = ps.str();
+            }
+            out << "set_max_delay " << period
+                << " -from [get_cells {" << src_cell << "}]"
+                << " -to [get_cells {" << dst_cell << "}]"
+                << "  ;# SYNCED: " << c.id << "\n";
+        } else {
+            // Unsynchronized violation: false path (flag for manual review)
+            out << "# WARNING: unsynchronized crossing " << c.id << "\n";
+            out << "set_false_path"
+                << " -from [get_cells {" << src_cell << "}]"
+                << " -to [get_cells {" << dst_cell << "}]"
+                << "  ;# VIOLATION: " << c.id << " — needs synchronizer\n";
+        }
+    }
 }
 
 void ReportGenerator::generateDOT(const std::filesystem::path& output_path) const {

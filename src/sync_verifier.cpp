@@ -210,10 +210,25 @@ void SyncVerifier::analyze() {
 
         // Update category based on sync detection
         if (crossing.sync_type != SyncType::None) {
-            crossing.category = ViolationCategory::Info;
-            crossing.severity = Severity::Info;
-            crossing.recommendation.clear();
-            crossing.id = "INFO-" + std::to_string(++info_counter_);
+            // Determine if the sync chain meets the required stages
+            int stages = 0;
+            if (crossing.sync_type == SyncType::TwoFF) stages = 2;
+            else if (crossing.sync_type == SyncType::ThreeFF) stages = 3;
+            else stages = required_stages_; // other types always qualify
+
+            if (stages >= required_stages_) {
+                crossing.category = ViolationCategory::Info;
+                crossing.severity = Severity::Info;
+                crossing.recommendation.clear();
+                crossing.id = "INFO-" + std::to_string(++info_counter_);
+            } else {
+                crossing.category = ViolationCategory::Caution;
+                crossing.severity = Severity::Medium;
+                crossing.id = "CAUTION-" + std::to_string(++caution_counter_);
+                crossing.recommendation = "Synchronizer has " +
+                    std::to_string(stages) + " stages but " +
+                    std::to_string(required_stages_) + " required.";
+            }
         }
     }
 
@@ -226,5 +241,40 @@ void SyncVerifier::analyze() {
     // Phase 4: Detect reset synchronizer issues
     detectResetSyncIssues();
 }
+
+// ─── Future synchronizer pattern detection criteria ───
+//
+// GrayCode:
+//   Detect multi-bit buses where all bits cross the same domain pair.
+//   The source side must encode using binary-to-gray conversion (XOR chain),
+//   and the destination side must decode with gray-to-binary. Both the
+//   encoder output and decoder input should pass through 2-FF synchronizers.
+//   Key structural pattern: N-bit register → N XOR gates → N 2-FF syncs.
+//
+// Handshake:
+//   Detect paired crossings: a request signal from domain A→B and an
+//   acknowledge signal from domain B→A. Both must be single-bit and have
+//   2-FF synchronizers. The request/ack pair forms a closed-loop protocol.
+//   Key structural pattern: req FF in domain A, ack FF in domain B,
+//   each crossing the other domain with a 2-FF sync chain.
+//
+// AsyncFIFO:
+//   Detect gray-coded write and read pointers crossing between domains.
+//   The FIFO must have: (1) write pointer gray-encoded crossing to read
+//   domain, (2) read pointer gray-encoded crossing to write domain,
+//   (3) full/empty comparators in the respective domains.
+//   Key structural pattern: dual-port memory + gray pointer pairs.
+//
+// MuxSync:
+//   Detect a multiplexer whose select signal is synchronized, allowing
+//   multi-bit data to cross safely. The data path goes through a MUX
+//   controlled by a synced select; the data is stable when select toggles.
+//   Key structural pattern: MUX with synced select + hold timing constraint.
+//
+// PulseSync:
+//   Detect a toggle-domain-crossing pulse synchronizer. The source domain
+//   toggles a FF on each pulse, the toggle signal is 2-FF synced, and the
+//   destination domain XORs consecutive sync outputs to regenerate the pulse.
+//   Key structural pattern: toggle FF → 2-FF sync → XOR edge detector.
 
 } // namespace slang_cdc
