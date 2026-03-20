@@ -9,6 +9,7 @@
 #include "slang/ast/statements/MiscStatements.h"
 #include "slang/ast/expressions/MiscExpressions.h"
 #include "slang/ast/expressions/AssignmentExpressions.h"
+#include "slang/ast/expressions/OperatorExpressions.h"
 #include "slang/ast/Expression.h"
 #include "slang/ast/Statement.h"
 #include "slang/ast/statements/ConditionalStatements.h"
@@ -114,9 +115,50 @@ static SensitivityInfo classifyEvents(const std::vector<EventInfo>& events) {
     return info;
 }
 
-// Collect variable names assigned in a statement (the FF registers)
+// Collect referenced signal names from an expression (RHS of assignment)
+static void collectRHSSignals(const slang::ast::Expression& expr,
+                              std::vector<std::string>& signals) {
+    switch (expr.kind) {
+        case slang::ast::ExpressionKind::NamedValue:
+        case slang::ast::ExpressionKind::HierarchicalValue: {
+            auto& named = expr.as<slang::ast::ValueExpressionBase>();
+            std::string name(named.symbol.name);
+            if (std::find(signals.begin(), signals.end(), name) == signals.end())
+                signals.push_back(name);
+            return;
+        }
+        case slang::ast::ExpressionKind::UnaryOp: {
+            auto& unary = expr.as<slang::ast::UnaryExpression>();
+            collectRHSSignals(unary.operand(), signals);
+            return;
+        }
+        case slang::ast::ExpressionKind::BinaryOp: {
+            auto& binary = expr.as<slang::ast::BinaryExpression>();
+            collectRHSSignals(binary.left(), signals);
+            collectRHSSignals(binary.right(), signals);
+            return;
+        }
+        case slang::ast::ExpressionKind::ConditionalOp: {
+            auto& cond = expr.as<slang::ast::ConditionalExpression>();
+            collectRHSSignals(cond.left(), signals);
+            collectRHSSignals(cond.right(), signals);
+            return;
+        }
+        default:
+            return;
+    }
+}
+
+// Per-variable assignment info: LHS variable name + all RHS signal names
+struct FFAssignInfo {
+    std::string lhs_name;
+    std::vector<std::string> rhs_signals;
+};
+
+// Collect variable names assigned in a statement (the FF registers) with fanin info
 static void collectAssignedVars(const slang::ast::Statement& stmt,
-                                std::vector<std::string>& vars) {
+                                std::vector<std::string>& vars,
+                                std::vector<FFAssignInfo>& assign_infos) {
     switch (stmt.kind) {
         case slang::ast::StatementKind::ExpressionStatement: {
             auto& exprStmt = stmt.as<slang::ast::ExpressionStatement>();
@@ -125,34 +167,40 @@ static void collectAssignedVars(const slang::ast::Statement& stmt,
                 auto& assign = expr.as<slang::ast::AssignmentExpression>();
                 std::string name = extractSignalName(assign.left());
                 if (!name.empty()) {
-                    // Avoid duplicates
+                    // Avoid duplicates in vars list
                     if (std::find(vars.begin(), vars.end(), name) == vars.end())
                         vars.push_back(name);
+
+                    // Collect RHS signals for fanin
+                    FFAssignInfo info;
+                    info.lhs_name = name;
+                    collectRHSSignals(assign.right(), info.rhs_signals);
+                    assign_infos.push_back(std::move(info));
                 }
             }
             break;
         }
         case slang::ast::StatementKind::Timed: {
             auto& timed = stmt.as<slang::ast::TimedStatement>();
-            collectAssignedVars(timed.stmt, vars);
+            collectAssignedVars(timed.stmt, vars, assign_infos);
             break;
         }
         case slang::ast::StatementKind::Block: {
             auto& block = stmt.as<slang::ast::BlockStatement>();
-            collectAssignedVars(block.body, vars);
+            collectAssignedVars(block.body, vars, assign_infos);
             break;
         }
         case slang::ast::StatementKind::List: {
             auto& list = stmt.as<slang::ast::StatementList>();
             for (auto* child : list.list)
-                if (child) collectAssignedVars(*child, vars);
+                if (child) collectAssignedVars(*child, vars, assign_infos);
             break;
         }
         case slang::ast::StatementKind::Conditional: {
             auto& cond = stmt.as<slang::ast::ConditionalStatement>();
-            collectAssignedVars(cond.ifTrue, vars);
+            collectAssignedVars(cond.ifTrue, vars, assign_infos);
             if (cond.ifFalse)
-                collectAssignedVars(*cond.ifFalse, vars);
+                collectAssignedVars(*cond.ifFalse, vars, assign_infos);
             break;
         }
         default: break;
@@ -205,6 +253,8 @@ static void processInstance(const slang::ast::InstanceSymbol& inst,
 
             // Find or create the domain for this clock
             ClockDomain* domain = nullptr;
+
+            // 1) Direct match: source name or origin_signal matches the clock name
             for (auto& src : clock_db.sources) {
                 if (src->origin_signal == sens.clock_name ||
                     src->name == sens.clock_name) {
@@ -213,7 +263,23 @@ static void processInstance(const slang::ast::InstanceSymbol& inst,
                 }
             }
 
-            // If clock not found in db, create an auto-detected source
+            // 2) Clock net lookup: the clock may have been propagated through
+            //    port connections with a different name (e.g., proc_clk <- sys_clk).
+            //    Search clock nets by matching instance + clock name patterns.
+            if (!domain) {
+                std::string short_path = std::string(inst.name) + "." + sens.clock_name;
+                std::string full_path = inst_path + "." + sens.clock_name;
+                for (auto& net : clock_db.nets) {
+                    if (net->hier_path == full_path ||
+                        net->hier_path == short_path ||
+                        net->hier_path == sens.clock_name) {
+                        domain = clock_db.findOrCreateDomain(net->source, sens.clock_edge);
+                        break;
+                    }
+                }
+            }
+
+            // 3) If clock not found in db, create an auto-detected source
             if (!domain) {
                 auto src = std::make_unique<ClockSource>();
                 src->id = "auto_ff_" + sens.clock_name;
@@ -236,13 +302,11 @@ static void processInstance(const slang::ast::InstanceSymbol& inst,
             }
 
             // Collect variables assigned in this always_ff → these are FFs
-            // For now, scan the instance body for variables used in this block
-            // Simple approach: every variable in the instance body that is
-            // driven by this always_ff is an FF
-            // We get assigned vars from the statements
+            // Also collect per-variable fanin signals (RHS references)
             std::vector<std::string> assigned_vars;
+            std::vector<FFAssignInfo> assign_infos;
             if (inner_stmt)
-                collectAssignedVars(*inner_stmt, assigned_vars);
+                collectAssignedVars(*inner_stmt, assigned_vars, assign_infos);
 
             if (assigned_vars.empty()) {
                 // Fallback: create a single FF node for the entire block
@@ -258,6 +322,20 @@ static void processInstance(const slang::ast::InstanceSymbol& inst,
                     ff->hier_path = inst_path + "." + var_name;
                     ff->domain = domain;
                     ff->reset = reset_ptr;
+
+                    // Populate fanin_signals from all assignments to this variable
+                    for (auto& ai : assign_infos) {
+                        if (ai.lhs_name == var_name) {
+                            for (auto& rhs : ai.rhs_signals) {
+                                if (std::find(ff->fanin_signals.begin(),
+                                              ff->fanin_signals.end(),
+                                              rhs) == ff->fanin_signals.end()) {
+                                    ff->fanin_signals.push_back(rhs);
+                                }
+                            }
+                        }
+                    }
+
                     ff_nodes.push_back(std::move(ff));
                 }
             }

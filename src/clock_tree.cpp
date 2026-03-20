@@ -1,6 +1,12 @@
 #include "slang-cdc/clock_tree.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
 #include "slang/ast/symbols/BlockSymbols.h"
+#include "slang/ast/TimingControl.h"
+#include "slang/ast/statements/MiscStatements.h"
+#include "slang/ast/expressions/MiscExpressions.h"
+#include "slang/ast/SemanticFacts.h"
+#include "slang/ast/Expression.h"
+#include "slang/ast/Statement.h"
 
 #include <algorithm>
 #include <regex>
@@ -105,6 +111,15 @@ void ClockTreeAnalyzer::autoDetectClockPorts() {
 
 // ── Phase 1b: Hierarchical propagation ──
 
+// Extract signal name from an expression (NamedValueExpression)
+static std::string extractSignalNameFromExpr(const slang::ast::Expression& expr) {
+    if (expr.kind == slang::ast::ExpressionKind::NamedValue) {
+        auto& named = expr.as<slang::ast::NamedValueExpression>();
+        return std::string(named.symbol.name);
+    }
+    return "";
+}
+
 void ClockTreeAnalyzer::propagateFromRoot() {
     // Build initial net map from known sources at top level
     std::unordered_map<std::string, ClockNet*> top_nets;
@@ -130,31 +145,44 @@ void ClockTreeAnalyzer::propagateInstance(
 {
     std::unordered_map<std::string, ClockNet*> local_nets;
 
-    // Map port connections: if parent net is a known clock, create local ClockNet
-    for (auto* conn : inst.getPortConnections()) {
-        if (!conn) continue;
-        auto* expr = conn->getExpression();
-        if (!expr) continue;
+    auto port_connections = inst.getPortConnections();
 
-        // TODO: extract net name from expression (NamedValueExpression)
-        // For now, match by port name against parent nets
-        auto& port = conn->port;
-        std::string port_name(port.name);
+    if (port_connections.empty()) {
+        // Root-level instance: no port connections from parent.
+        // Seed local_nets directly from parent_nets — the port names at the
+        // module boundary correspond to top-level clock source names.
+        for (auto& [name, net] : parent_nets) {
+            local_nets[name] = net;
+        }
+    } else {
+        // Map port connections: resolve the actual expression to find parent clock net
+        for (auto* conn : port_connections) {
+            if (!conn) continue;
 
-        // Check if parent side of this connection is a known clock net
-        for (auto& [parent_net_name, parent_clock_net] : parent_nets) {
-            // Heuristic: port name matches parent net name, or
-            // the expression references the parent net
-            if (port_name == parent_net_name || isClockName(port_name)) {
-                if (parent_nets.count(parent_net_name)) {
-                    auto net = std::make_unique<ClockNet>();
-                    net->hier_path = std::string(inst.name) + "." + port_name;
-                    net->source = parent_clock_net->source; // Same source!
-                    net->edge = parent_clock_net->edge;
-                    auto* net_ptr = clock_db_.addNet(std::move(net));
-                    local_nets[port_name] = net_ptr;
-                    break;
+            auto& port = conn->port;
+            std::string port_name(port.name);
+
+            ClockNet* parent_clock_net = nullptr;
+
+            // Resolve the actual signal name from the connection expression
+            auto* expr = conn->getExpression();
+            if (expr) {
+                std::string actual_signal = extractSignalNameFromExpr(*expr);
+                if (!actual_signal.empty()) {
+                    auto it = parent_nets.find(actual_signal);
+                    if (it != parent_nets.end()) {
+                        parent_clock_net = it->second;
+                    }
                 }
+            }
+
+            if (parent_clock_net) {
+                auto net = std::make_unique<ClockNet>();
+                net->hier_path = std::string(inst.name) + "." + port_name;
+                net->source = parent_clock_net->source; // Same source!
+                net->edge = parent_clock_net->edge;
+                auto* net_ptr = clock_db_.addNet(std::move(net));
+                local_nets[port_name] = net_ptr;
             }
         }
     }
@@ -172,11 +200,87 @@ void ClockTreeAnalyzer::collectSensitivityClocks(
     const slang::ast::InstanceSymbol& inst,
     std::unordered_map<std::string, ClockNet*>& local_nets)
 {
-    // TODO: Walk ProceduralBlockSymbol(AlwaysFF) → TimedStatement →
-    //       SignalEventControl → extract clock signal name + edge
-    //       If clock not yet in local_nets, register as new auto-detected source
-    (void)inst;
-    (void)local_nets;
+    for (auto& member : inst.body.members()) {
+        if (member.kind != slang::ast::SymbolKind::ProceduralBlock)
+            continue;
+
+        auto& block = member.as<slang::ast::ProceduralBlockSymbol>();
+        if (block.procedureKind != slang::ast::ProceduralBlockKind::AlwaysFF &&
+            block.procedureKind != slang::ast::ProceduralBlockKind::Always)
+            continue;
+
+        auto& body = block.getBody();
+        if (body.kind != slang::ast::StatementKind::Timed)
+            continue;
+
+        auto& timed = body.as<slang::ast::TimedStatement>();
+        auto& timing = timed.timing;
+
+        // Extract events from sensitivity list
+        std::vector<std::pair<std::string, Edge>> events;
+
+        auto processEvent = [&](const slang::ast::TimingControl& tc) {
+            if (tc.kind != slang::ast::TimingControlKind::SignalEvent)
+                return;
+            auto& sec = tc.as<slang::ast::SignalEventControl>();
+            std::string sig_name = extractSignalNameFromExpr(sec.expr);
+            if (sig_name.empty()) return;
+            Edge edge = (sec.edge == slang::ast::EdgeKind::PosEdge) ?
+                Edge::Posedge : Edge::Negedge;
+            events.push_back({sig_name, edge});
+        };
+
+        if (timing.kind == slang::ast::TimingControlKind::SignalEvent) {
+            processEvent(timing);
+        } else if (timing.kind == slang::ast::TimingControlKind::EventList) {
+            auto& list = timing.as<slang::ast::EventListControl>();
+            for (auto* ev : list.events) {
+                if (ev) processEvent(*ev);
+            }
+        }
+
+        // Classify: find the clock signal (not a reset)
+        for (auto& [sig_name, edge] : events) {
+            bool looks_clock = isClockName(sig_name);
+            bool looks_reset = isResetName(sig_name);
+
+            // Skip resets
+            if (looks_reset && !looks_clock)
+                continue;
+
+            // If this signal is already a known local net, skip
+            if (local_nets.count(sig_name))
+                continue;
+
+            // Check if there's already a source for this clock
+            ClockSource* found_source = nullptr;
+            for (auto& src : clock_db_.sources) {
+                if (src->origin_signal == sig_name || src->name == sig_name) {
+                    found_source = src.get();
+                    break;
+                }
+            }
+
+            // If no source found and it looks like a clock, create auto-detected
+            if (!found_source && looks_clock) {
+                auto src = std::make_unique<ClockSource>();
+                src->id = "auto_sens_" + sig_name;
+                src->name = sig_name;
+                src->type = ClockSource::Type::AutoDetected;
+                src->origin_signal = sig_name;
+                found_source = clock_db_.addSource(std::move(src));
+            }
+
+            if (found_source) {
+                auto net = std::make_unique<ClockNet>();
+                net->hier_path = std::string(inst.name) + "." + sig_name;
+                net->source = found_source;
+                net->edge = edge;
+                auto* net_ptr = clock_db_.addNet(std::move(net));
+                local_nets[sig_name] = net_ptr;
+            }
+        }
+    }
 }
 
 // ── Phase 1c: Relationship registration ──

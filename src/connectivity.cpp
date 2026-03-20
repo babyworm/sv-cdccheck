@@ -1,6 +1,7 @@
 #include "slang-cdc/connectivity.h"
 #include "slang/ast/symbols/CompilationUnitSymbols.h"
 #include "slang/ast/symbols/InstanceSymbols.h"
+#include "slang/ast/symbols/PortSymbols.h"
 #include "slang/ast/symbols/BlockSymbols.h"
 #include "slang/ast/symbols/VariableSymbols.h"
 #include "slang/ast/TimingControl.h"
@@ -111,32 +112,171 @@ static void collectAssignments(const slang::ast::Statement& stmt,
 std::unordered_map<std::string, FFNode*> ConnectivityBuilder::buildFFOutputMap() const {
     std::unordered_map<std::string, FFNode*> map;
     for (auto& ff : ff_nodes_) {
-        // Key: the simple variable name (last component of hier_path)
-        auto& path = ff->hier_path;
-        auto dot = path.rfind('.');
-        std::string var_name = (dot != std::string::npos) ?
-            path.substr(dot + 1) : path;
-        map[var_name] = ff.get();
-
-        // Also store full path for cross-module matching
-        map[path] = ff.get();
+        // Primary key: full hierarchical path (unique, no collisions)
+        map[ff->hier_path] = ff.get();
     }
     return map;
 }
 
-void ConnectivityBuilder::findFFtoFFEdges(
-    const std::unordered_map<std::string, FFNode*>& output_map)
+// Extract signal name from a NamedValueExpression
+static std::string extractExprSignalName(const slang::ast::Expression& expr) {
+    if (expr.kind == slang::ast::ExpressionKind::NamedValue) {
+        return std::string(expr.as<slang::ast::NamedValueExpression>().symbol.name);
+    }
+    return "";
+}
+
+// Build port-to-actual-signal map for an instance: port_name -> actual_signal_name
+static std::unordered_map<std::string, std::string> buildPortMap(
+    const slang::ast::InstanceSymbol& inst)
 {
-    // For each instance, collect assignments in always_ff blocks
-    // Then check if RHS references any FF output
-    auto& root = compilation_.getRoot();
+    std::unordered_map<std::string, std::string> port_map;
+    for (auto* conn : inst.getPortConnections()) {
+        if (!conn) continue;
+        auto* expr = conn->getExpression();
+        if (!expr) continue;
+        std::string actual = extractExprSignalName(*expr);
+        if (!actual.empty()) {
+            port_map[std::string(conn->port.name)] = actual;
+        }
+    }
+    return port_map;
+}
 
-    for (auto& member : root.members()) {
+// Extract signal name from an expression, handling Assignment expressions
+// (slang models output port connections as assignments: wire = port_internal)
+static std::string extractWireNameFromExpr(const slang::ast::Expression& expr) {
+    // Simple named value
+    if (expr.kind == slang::ast::ExpressionKind::NamedValue) {
+        return std::string(expr.as<slang::ast::NamedValueExpression>().symbol.name);
+    }
+    // Output port: Assignment expression where LHS is the wire
+    if (expr.kind == slang::ast::ExpressionKind::Assignment) {
+        auto& assign = expr.as<slang::ast::AssignmentExpression>();
+        if (assign.left().kind == slang::ast::ExpressionKind::NamedValue) {
+            return std::string(
+                assign.left().as<slang::ast::NamedValueExpression>().symbol.name);
+        }
+    }
+    return "";
+}
+
+// Build a map: wire/signal name -> FFNode* for output ports of child instances
+// E.g., if child u_a has output q connected to wire_ab, map wire_ab -> u_a.q FF
+static void buildWireToFFMap(
+    const slang::ast::InstanceSymbol& inst,
+    const std::string& inst_path,
+    const std::unordered_map<std::string, FFNode*>& output_map,
+    std::unordered_map<std::string, FFNode*>& wire_map)
+{
+    for (auto& member : inst.body.members()) {
         if (member.kind != slang::ast::SymbolKind::Instance) continue;
-        auto& inst = member.as<slang::ast::InstanceSymbol>();
+        auto& child = member.as<slang::ast::InstanceSymbol>();
+        std::string child_path = inst_path + "." + std::string(child.name);
 
-        for (auto& body_member : inst.body.members()) {
-            if (body_member.kind != slang::ast::SymbolKind::ProceduralBlock) continue;
+        for (auto* conn : child.getPortConnections()) {
+            if (!conn) continue;
+            // Only care about output ports
+            if (conn->port.kind != slang::ast::SymbolKind::Port) continue;
+            auto& port_sym = conn->port.as<slang::ast::PortSymbol>();
+            if (port_sym.direction != slang::ast::ArgumentDirection::Out) continue;
+            auto* expr = conn->getExpression();
+            if (!expr) continue;
+            std::string wire_name = extractWireNameFromExpr(*expr);
+            if (wire_name.empty()) continue;
+
+            // Check if the port corresponds to an FF output
+            std::string ff_path = child_path + "." + std::string(conn->port.name);
+            auto it = output_map.find(ff_path);
+            if (it != output_map.end()) {
+                wire_map[wire_name] = it->second;
+            }
+        }
+    }
+}
+
+// Find an FFNode by signal name within a given instance scope.
+// Uses port_map to resolve port names to actual parent signals,
+// and wire_map to resolve parent wires to FF outputs.
+static FFNode* findFFByName(
+    const std::string& sig_name,
+    const std::string& inst_path,
+    const std::unordered_map<std::string, FFNode*>& output_map,
+    const std::unordered_map<std::string, std::string>& port_map,
+    const std::unordered_map<std::string, FFNode*>& wire_map)
+{
+    // Try full scoped path first (same instance)
+    std::string full_name = inst_path + "." + sig_name;
+    auto it = output_map.find(full_name);
+    if (it != output_map.end())
+        return it->second;
+
+    // Try just the signal name as a full path
+    it = output_map.find(sig_name);
+    if (it != output_map.end())
+        return it->second;
+
+    // Resolve through port connection: sig_name is a port, trace to actual signal
+    auto pit = port_map.find(sig_name);
+    if (pit != port_map.end()) {
+        const std::string& actual = pit->second;
+
+        // Check if the actual signal is a wire connected to a child FF output
+        auto wit = wire_map.find(actual);
+        if (wit != wire_map.end())
+            return wit->second;
+
+        // Try the actual signal in parent scope
+        std::string parent_path;
+        auto last_dot = inst_path.rfind('.');
+        if (last_dot != std::string::npos) {
+            parent_path = inst_path.substr(0, last_dot);
+            std::string parent_full = parent_path + "." + actual;
+            it = output_map.find(parent_full);
+            if (it != output_map.end())
+                return it->second;
+        }
+    }
+
+    // Try matching by suffix in the same parent scope
+    std::string parent_path;
+    auto last_dot = inst_path.rfind('.');
+    if (last_dot != std::string::npos) {
+        parent_path = inst_path.substr(0, last_dot);
+        for (auto& [path, ff] : output_map) {
+            if (path.starts_with(parent_path + ".") &&
+                path.ends_with("." + sig_name)) {
+                return ff;
+            }
+        }
+    }
+
+    return nullptr;
+}
+
+// Recursive: process an instance and its children for FF-to-FF edges
+static void processInstanceEdges(
+    const slang::ast::InstanceSymbol& inst,
+    const std::string& inst_path,
+    const std::unordered_map<std::string, FFNode*>& output_map,
+    const std::unordered_map<std::string, FFNode*>& parent_wire_map,
+    std::vector<FFEdge>& edges)
+{
+    // Build port map for this instance (port_name -> actual_signal in parent)
+    auto port_map = buildPortMap(inst);
+
+    // Build wire-to-FF map for wires in this instance's scope
+    std::unordered_map<std::string, FFNode*> wire_map;
+    buildWireToFFMap(inst, inst_path, output_map, wire_map);
+
+    // Merge parent wire map for port resolution
+    // (parent_wire_map is used when resolving port signals to wires in grandparent)
+    std::unordered_map<std::string, FFNode*> combined_wire_map = parent_wire_map;
+    for (auto& [k, v] : wire_map)
+        combined_wire_map[k] = v;
+
+    for (auto& body_member : inst.body.members()) {
+        if (body_member.kind == slang::ast::SymbolKind::ProceduralBlock) {
             auto& block = body_member.as<slang::ast::ProceduralBlockSymbol>();
             if (block.procedureKind != slang::ast::ProceduralBlockKind::AlwaysFF &&
                 block.procedureKind != slang::ast::ProceduralBlockKind::Always)
@@ -147,42 +287,45 @@ void ConnectivityBuilder::findFFtoFFEdges(
             collectAssignments(body, assignments);
 
             for (auto& assign : assignments) {
-                // Find the dest FF (LHS)
-                FFNode* dest = nullptr;
-                auto it = output_map.find(assign.lhs_name);
-                if (it != output_map.end())
-                    dest = it->second;
-                if (!dest) {
-                    // Try with instance prefix
-                    std::string full_name = std::string(inst.name) + "." + assign.lhs_name;
-                    it = output_map.find(full_name);
-                    if (it != output_map.end())
-                        dest = it->second;
-                }
+                FFNode* dest = findFFByName(assign.lhs_name, inst_path,
+                                            output_map, port_map, combined_wire_map);
                 if (!dest) continue;
 
-                // Check each RHS signal — if it's an FF output, create an edge
                 for (auto& rhs_sig : assign.rhs_signals) {
-                    FFNode* source = nullptr;
-                    auto sit = output_map.find(rhs_sig);
-                    if (sit != output_map.end())
-                        source = sit->second;
-                    if (!source) {
-                        std::string full_name = std::string(inst.name) + "." + rhs_sig;
-                        sit = output_map.find(full_name);
-                        if (sit != output_map.end())
-                            source = sit->second;
-                    }
+                    FFNode* source = findFFByName(rhs_sig, inst_path,
+                                                  output_map, port_map, combined_wire_map);
 
                     if (source && source != dest) {
                         FFEdge edge;
                         edge.source = source;
                         edge.dest = dest;
-                        edges_.push_back(edge);
+                        edge.comb_path = assign.rhs_signals;
+                        edges.push_back(edge);
                     }
                 }
             }
         }
+
+        // Recurse into child instances
+        if (body_member.kind == slang::ast::SymbolKind::Instance) {
+            auto& child = body_member.as<slang::ast::InstanceSymbol>();
+            std::string child_path = inst_path + "." + std::string(child.name);
+            processInstanceEdges(child, child_path, output_map, wire_map, edges);
+        }
+    }
+}
+
+void ConnectivityBuilder::findFFtoFFEdges(
+    const std::unordered_map<std::string, FFNode*>& output_map)
+{
+    auto& root = compilation_.getRoot();
+    std::unordered_map<std::string, FFNode*> empty_wire_map;
+
+    for (auto& member : root.members()) {
+        if (member.kind != slang::ast::SymbolKind::Instance) continue;
+        auto& inst = member.as<slang::ast::InstanceSymbol>();
+        std::string inst_path(inst.name);
+        processInstanceEdges(inst, inst_path, output_map, empty_wire_map, edges_);
     }
 }
 

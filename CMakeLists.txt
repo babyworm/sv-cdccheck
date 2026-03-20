@@ -60,6 +60,7 @@ if(SLANG_CDC_BUILD_TESTS)
         tests/test_sync_verifier.cpp
         tests/test_report_generator.cpp
         tests/test_edge_cases.cpp
+        tests/test_phase2_hierarchy.cpp
     )
     target_link_libraries(slang-cdc-tests PRIVATE slang-cdc-lib Catch2::Catch2WithMain)
     add_test(NAME slang-cdc-tests COMMAND slang-cdc-tests)
