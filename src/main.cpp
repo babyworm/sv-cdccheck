@@ -10,6 +10,7 @@
 
 #include "slang-cdc/types.h"
 #include "slang-cdc/clock_tree.h"
+#include "slang-cdc/sdc_parser.h"
 #include "slang-cdc/ff_classifier.h"
 #include "slang-cdc/connectivity.h"
 #include "slang-cdc/crossing_detector.h"
@@ -28,6 +29,7 @@ static void printUsage() {
               << "  -o, --output <dir>      Output directory (default: ./cdc_reports/)\n"
               << "  --format <fmt>          md|json|all (default: all)\n\n"
               << "Options:\n"
+              << "  --sdc <file>            SDC file with clock definitions\n"
               << "  -v, --verbose           Detailed output\n"
               << "  -q, --quiet             Only violations and summary\n"
               << "  --version               Show version\n"
@@ -40,7 +42,13 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Check for --version or --help early
+    // Pre-scan for our custom args before passing to slang
+    std::string output_dir = "./cdc_reports";
+    std::string format = "all";
+    std::string sdc_file;
+    bool quiet = false;
+    bool verbose = false;
+
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--version") {
@@ -51,9 +59,19 @@ int main(int argc, char** argv) {
             printUsage();
             return 0;
         }
+        if ((arg == "-o" || arg == "--output") && i + 1 < argc)
+            output_dir = argv[++i];
+        else if (arg == "--format" && i + 1 < argc)
+            format = argv[++i];
+        else if (arg == "--sdc" && i + 1 < argc)
+            sdc_file = argv[++i];
+        else if (arg == "-q" || arg == "--quiet")
+            quiet = true;
+        else if (arg == "-v" || arg == "--verbose")
+            verbose = true;
     }
 
-    // Use slang's Driver for argument parsing and compilation
+    // Use slang's Driver for SV argument parsing and compilation
     slang::driver::Driver driver;
     driver.addStandardArgs();
 
@@ -67,37 +85,79 @@ int main(int argc, char** argv) {
         return 1;
 
     auto compilation = driver.createCompilation();
-    auto& root = compilation->getRoot();
+    compilation->getRoot();
+    compilation->getAllDiagnostics();
 
-    // Verify we got a valid compilation
-    auto& diags = compilation->getAllDiagnostics();
-    if (!diags.empty()) {
-        for (auto& diag : diags) {
-            // TODO: proper diagnostic printing
-            std::cerr << "slang diagnostic reported\n";
-        }
+    if (!quiet)
+        std::cout << "slang-cdc: Design elaborated successfully.\n";
+
+    // ─── Pass 1: Clock Tree Analysis ───
+    slang_cdc::ClockDatabase clock_db;
+    slang_cdc::ClockTreeAnalyzer clock_analyzer(*compilation, clock_db);
+
+    if (!sdc_file.empty()) {
+        if (verbose)
+            std::cout << "  Loading SDC: " << sdc_file << "\n";
+        auto sdc = slang_cdc::SdcParser::parse(sdc_file);
+        clock_analyzer.loadSdc(sdc);
     }
 
-    std::cout << "slang-cdc: Design elaborated successfully.\n";
+    clock_analyzer.analyze();
 
-    // Count top-level instances for sanity check
-    int instance_count = 0;
-    for (auto& member : root.members()) {
-        if (member.kind == slang::ast::SymbolKind::Instance) {
-            instance_count++;
-            auto& inst = member.as<slang::ast::InstanceSymbol>();
-            std::cout << "  Top instance: " << inst.name << "\n";
-        }
+    if (verbose) {
+        std::cout << "  Clock sources: " << clock_db.sources.size() << "\n";
+        for (auto& src : clock_db.sources)
+            std::cout << "    " << src->name << " (" << src->origin_signal << ")\n";
     }
-    std::cout << "  Total top instances: " << instance_count << "\n";
 
-    // TODO: Wire up analysis passes
-    // Pass 1: ClockTreeAnalyzer
-    // Pass 2: FFClassifier
-    // Pass 3: ConnectivityBuilder
-    // Pass 4: CrossingDetector
-    // Pass 5: SyncVerifier
-    // Pass 6: ReportGenerator
+    // ─── Pass 2: FF Classification ───
+    slang_cdc::FFClassifier classifier(*compilation, clock_db);
+    classifier.analyze();
 
-    return 0;
+    if (!quiet)
+        std::cout << "  FFs detected: " << classifier.getFFNodes().size() << "\n";
+
+    // ─── Pass 3: Connectivity Graph ───
+    slang_cdc::ConnectivityBuilder connectivity(*compilation, classifier.getFFNodes());
+    connectivity.analyze();
+
+    if (verbose)
+        std::cout << "  FF-to-FF edges: " << connectivity.getEdges().size() << "\n";
+
+    // ─── Pass 4: Cross-Domain Detection ───
+    slang_cdc::CrossingDetector detector(connectivity.getEdges(), clock_db);
+    detector.analyze();
+    auto crossings = detector.getCrossings();
+
+    // ─── Pass 5: Synchronizer Verification ───
+    slang_cdc::SyncVerifier verifier(crossings, classifier.getFFNodes(),
+                                     connectivity.getEdges());
+    verifier.analyze();
+
+    // ─── Pass 6: Report Generation ───
+    slang_cdc::AnalysisResult result;
+    result.clock_db = std::move(clock_db);
+    result.crossings = std::move(crossings);
+
+    fs::create_directories(output_dir);
+
+    slang_cdc::ReportGenerator report(result);
+
+    if (format == "md" || format == "all")
+        report.generateMarkdown(fs::path(output_dir) / "cdc_report.md");
+
+    if (format == "json" || format == "all")
+        report.generateJSON(fs::path(output_dir) / "cdc_report.json");
+
+    // ─── Summary ───
+    if (!quiet) {
+        std::cout << "\n  === CDC Summary ===\n";
+        std::cout << "  VIOLATION: " << result.violation_count() << "\n";
+        std::cout << "  CAUTION:   " << result.caution_count() << "\n";
+        std::cout << "  INFO:      " << result.info_count() << "\n";
+        std::cout << "\n  Reports written to: " << output_dir << "/\n";
+    }
+
+    // Exit code = violation count (for CI)
+    return result.violation_count();
 }

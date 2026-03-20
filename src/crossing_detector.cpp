@@ -36,7 +36,7 @@ void CrossingDetector::analyze() {
             // Related domains (divided, gated) — lower severity
             report.severity = Severity::Medium;
             report.category = ViolationCategory::Caution;
-            report.id = "CAUTION-" + std::to_string(++violation_counter_);
+            report.id = "CAUTION-" + std::to_string(++caution_counter_);
             report.recommendation = "Verify timing constraints for related-clock crossing";
         }
 

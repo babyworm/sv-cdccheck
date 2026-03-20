@@ -163,13 +163,22 @@ static void collectAssignedVars(const slang::ast::Statement& stmt,
 static void processInstance(const slang::ast::InstanceSymbol& inst,
                             const std::string& prefix,
                             ClockDatabase& clock_db,
-                            std::vector<std::unique_ptr<FFNode>>& ff_nodes) {
+                            std::vector<std::unique_ptr<FFNode>>& ff_nodes,
+                            std::vector<LatchWarning>& latch_warnings) {
     std::string inst_path = prefix.empty() ?
         std::string(inst.name) : prefix + "." + std::string(inst.name);
 
     for (auto& member : inst.body.members()) {
         if (member.kind == slang::ast::SymbolKind::ProceduralBlock) {
             auto& block = member.as<slang::ast::ProceduralBlockSymbol>();
+
+            // Flag latches as warnings (spec 4.2.3)
+            if (block.procedureKind == slang::ast::ProceduralBlockKind::AlwaysLatch) {
+                latch_warnings.push_back({inst_path,
+                    "always_latch detected — not a proper FF for CDC analysis"});
+                continue;
+            }
+
             if (block.procedureKind != slang::ast::ProceduralBlockKind::AlwaysFF &&
                 block.procedureKind != slang::ast::ProceduralBlockKind::Always)
                 continue;
@@ -257,7 +266,7 @@ static void processInstance(const slang::ast::InstanceSymbol& inst,
         // Recurse into child instances
         if (member.kind == slang::ast::SymbolKind::Instance) {
             processInstance(member.as<slang::ast::InstanceSymbol>(),
-                          inst_path, clock_db, ff_nodes);
+                          inst_path, clock_db, ff_nodes, latch_warnings);
         }
     }
 }
@@ -268,13 +277,17 @@ void FFClassifier::analyze() {
     for (auto& member : root.members()) {
         if (member.kind == slang::ast::SymbolKind::Instance) {
             processInstance(member.as<slang::ast::InstanceSymbol>(),
-                          "", clock_db_, ff_nodes_);
+                          "", clock_db_, ff_nodes_, latch_warnings_);
         }
     }
 }
 
 const std::vector<std::unique_ptr<FFNode>>& FFClassifier::getFFNodes() const {
     return ff_nodes_;
+}
+
+const std::vector<LatchWarning>& FFClassifier::getLatchWarnings() const {
+    return latch_warnings_;
 }
 
 } // namespace slang_cdc

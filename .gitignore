@@ -9,4 +9,5 @@ compile_commands.json
 *.dylib
 .DS_Store
 experiments/
+cdc_reports/
 .omc/

@@ -21,7 +21,7 @@ private:
     const ClockDatabase& clock_db_;
     std::vector<CrossingReport> crossings_;
     int violation_counter_ = 0;
-    int info_counter_ = 0;
+    int caution_counter_ = 0;
 };
 
 } // namespace slang_cdc
