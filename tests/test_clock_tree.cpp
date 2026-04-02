@@ -1,37 +1,14 @@
 #include <catch2/catch_test_macros.hpp>
+#include "test_helpers.h"
 #include "sv-cdccheck/clock_tree.h"
-#include "slang/ast/Compilation.h"
-#include "slang/ast/symbols/CompilationUnitSymbols.h"
-#include "slang/ast/symbols/InstanceSymbols.h"
-#include "slang/driver/Driver.h"
 
-#include <fstream>
 #include <filesystem>
 
 namespace fs = std::filesystem;
 using namespace sv_cdccheck;
 
-// Helper: compile a SystemVerilog string
 static std::unique_ptr<slang::ast::Compilation> compileSV(const std::string& sv_code) {
-    static int counter = 0;
-    auto path = fs::temp_directory_path() /
-        ("test_ct_" + std::to_string(counter++) + ".sv");
-    std::ofstream(path) << sv_code;
-
-    std::string path_str = path.string();
-    slang::driver::Driver driver;
-    driver.addStandardArgs();
-
-    const char* args[] = {"sv-cdccheck", path_str.c_str()};
-    driver.parseCommandLine(2, const_cast<char**>(args));
-    driver.processOptions();
-    driver.parseAllSources();
-
-    auto compilation = driver.createCompilation();
-    compilation->getRoot();
-    compilation->getAllDiagnostics();
-    // Do not remove temp file — slang references source text lazily
-    return compilation;
+    return sv_cdccheck::test::compileSV(sv_code, "test_ct");
 }
 
 TEST_CASE("ClockTreeAnalyzer: isClockName pattern matching", "[clock_tree]") {

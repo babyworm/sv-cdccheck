@@ -420,7 +420,7 @@ void ReportGenerator::generateWaiverTemplate(const std::filesystem::path& output
         if (c.category != ViolationCategory::Violation)
             continue;
         waiver_num++;
-        char id_buf[16];
+        char id_buf[24];
         snprintf(id_buf, sizeof(id_buf), "WAIVE-%03d", waiver_num);
         out << "  - id: " << id_buf << "\n";
         out << "    crossing: \"" << c.source_signal << " -> " << c.dest_signal << "\"\n";

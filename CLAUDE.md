@@ -2,7 +2,7 @@
 
 ## Build
 make build   # Release (fetches slang v10.0 via FetchContent)
-make test    # 161+ tests
+make test    # 256 test cases, 722 assertions
 make debug   # Debug build
 
 ## Architecture

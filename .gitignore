@@ -11,3 +11,8 @@ compile_commands.json
 experiments/
 cdc_reports/
 .omc/
+.omx/
+.rtl-agent-team/
+.rat/
+__pycache__/
+*.pyc

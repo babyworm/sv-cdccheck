@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(sv-cdccheck VERSION 0.1.1 LANGUAGES CXX)
+project(sv-cdccheck VERSION 0.1.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,11 +7,11 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # Options
-option(SLANG_CDC_BUILD_TESTS "Build test suite" ON)
-option(SLANG_CDC_USE_SYSTEM_SLANG "Use system-installed slang instead of FetchContent" OFF)
+option(SV_CDCCHECK_BUILD_TESTS "Build test suite" ON)
+option(SV_CDCCHECK_USE_SYSTEM_SLANG "Use system-installed slang instead of FetchContent" OFF)
 
 # --- Dependencies ---
-if(SLANG_CDC_USE_SYSTEM_SLANG)
+if(SV_CDCCHECK_USE_SYSTEM_SLANG)
     find_package(slang REQUIRED)
 else()
     include(cmake/FetchSlang.cmake)
@@ -43,7 +43,7 @@ add_executable(sv-cdccheck src/main.cpp)
 target_link_libraries(sv-cdccheck PRIVATE sv-cdccheck-lib)
 
 # --- Tests ---
-if(SLANG_CDC_BUILD_TESTS)
+if(SV_CDCCHECK_BUILD_TESTS)
     enable_testing()
 
     include(FetchContent)

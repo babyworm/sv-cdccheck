@@ -27,9 +27,9 @@ std::unique_ptr<slang::ast::Compilation> compileSpyglassSV(const std::string& sv
     slang::driver::Driver driver;
     driver.addStandardArgs();
     const char* args[] = {"test", path_str.c_str()};
-    driver.parseCommandLine(2, const_cast<char**>(args));
-    driver.processOptions();
-    driver.parseAllSources();
+    (void)driver.parseCommandLine(2, const_cast<char**>(args));
+    (void)driver.processOptions();
+    (void)driver.parseAllSources();
 
     auto compilation = driver.createCompilation();
     compilation->getRoot();

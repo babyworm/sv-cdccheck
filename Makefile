@@ -16,6 +16,13 @@ all: build
 
 # --- Dependency fetch (triggers CMake configure which runs FetchContent) ---
 deps:
+	@if [ -f $(BUILD_DIR)/CMakeCache.txt ]; then \
+		cached_src=$$(grep 'CMAKE_HOME_DIRECTORY' $(BUILD_DIR)/CMakeCache.txt 2>/dev/null | cut -d= -f2); \
+		if [ -n "$$cached_src" ] && [ "$$cached_src" != "$$(pwd)" ]; then \
+			echo "==> Stale CMake cache detected (was: $$cached_src), cleaning..."; \
+			rm -rf $(BUILD_DIR); \
+		fi; \
+	fi
 	@echo "==> Configuring + fetching dependencies (slang v10.0, fmt, Catch2)..."
 	cmake -S . -B $(BUILD_DIR) $(CMAKE_RELEASE) -DCMAKE_INSTALL_PREFIX=$(INSTALL_PREFIX)
 	@echo "==> Dependencies ready in $(BUILD_DIR)/_deps/"

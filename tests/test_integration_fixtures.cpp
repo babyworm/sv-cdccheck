@@ -21,9 +21,9 @@ static std::unique_ptr<slang::ast::Compilation> compileFile(const std::string& p
     slang::driver::Driver driver;
     driver.addStandardArgs();
     const char* args[] = {"test", path.c_str()};
-    driver.parseCommandLine(2, const_cast<char**>(args));
-    driver.processOptions();
-    driver.parseAllSources();
+    (void)driver.parseCommandLine(2, const_cast<char**>(args));
+    (void)driver.processOptions();
+    (void)driver.parseAllSources();
 
     auto compilation = driver.createCompilation();
     auto& root = compilation->getRoot();
