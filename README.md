@@ -113,7 +113,7 @@ make test     # 257 tests, ~720 assertions
 ```
 $ ./build/sv-cdccheck --help
 
-sv-cdccheck v0.1.1 — Structural CDC Analysis Tool
+sv-cdccheck v0.1.2 — Structural CDC Analysis Tool
 
 Usage: sv-cdccheck [OPTIONS] <SV_FILES...>
 

@@ -25,7 +25,7 @@
 namespace fs = std::filesystem;
 
 static void printUsage() {
-    std::cout << "sv-cdccheck v0.1.1 — Structural CDC Analysis Tool\n\n"
+    std::cout << "sv-cdccheck v0.1.2 — Structural CDC Analysis Tool\n\n"
               << "Usage: sv-cdccheck [OPTIONS] <SV_FILES...>\n\n"
               << "Required:\n"
               << "  <SV_FILES...>           SystemVerilog source files\n"
@@ -75,7 +75,7 @@ int main(int argc, char** argv) {
     for (int i = 1; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "--version") {
-            std::cout << "sv-cdccheck 0.1.1\n";
+            std::cout << "sv-cdccheck 0.1.2\n";
             return 0;
         }
         if (arg == "-h" || arg == "--help") {
