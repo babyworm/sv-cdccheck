@@ -1,7 +1,11 @@
 > [!IMPORTANT]
 > **이 프로젝트는 [svlens](https://github.com/babyworm/svlens) 프로젝트에 통합되었습니다. 이 저장소는 더 이상 유지보수되지 않으며 아카이브될 예정입니다. 앞으로는 svlens를 이용해 주세요.**
 >
+> **svlens**는 SystemVerilog RTL 코드에 대한 구조적 CDC(Clock Domain Crossing) 분석과 연결성 검사를 포함한 simplified structural lint 도구입니다.
+>
 > **This project has been merged into [svlens](https://github.com/babyworm/svlens). This repository is no longer maintained and will be archived. Please use svlens going forward.**
+>
+> **svlens** is a simplified structural lint tool for SystemVerilog RTL, covering structural CDC analysis as well as connectivity checks.
 
 # sv-cdccheck
 
